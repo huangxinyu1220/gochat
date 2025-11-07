@@ -1,0 +1,1485 @@
+openapi: 3.0.3
+info:
+  title: GoChat IM API
+  description: |
+    A comprehensive instant messaging API built with Go, providing real-time chat functionality,
+    user management, friend relationships, group chats, and file uploads.
+
+    ## Features
+    - JWT-based authentication
+    - Real-time messaging via WebSocket
+    - User registration and profile management
+    - Friend relationship management
+    - Group chat functionality
+    - File upload with deduplication
+    - Online status tracking
+
+    ## Authentication
+    Most endpoints require JWT authentication. Include the token in the Authorization header:
+    ```
+    Authorization: Bearer <your-jwt-token>
+    ```
+
+    ## WebSocket Connection
+    Real-time messaging uses WebSocket at `/ws?token=<jwt-token>`
+
+  version: "1.0.0"
+  contact:
+    name: GoChat API Support
+    email: support@gochat.com
+  license:
+    name: MIT
+    url: https://opensource.org/licenses/MIT
+
+servers:
+  - url: http://localhost:8080/api/v1
+    description: Development server
+  - url: https://api.gochat.com/api/v1
+    description: Production server
+
+# Security schemes
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  schemas:
+    # Error response schema
+    ErrorResponse:
+      type: object
+      properties:
+        code:
+          type: string
+          description: Error code
+          example: "BAD_REQUEST"
+        message:
+          type: string
+          description: Human readable error message
+          example: "Invalid request data"
+        details:
+          type: string
+          description: Additional error details
+          example: "Field 'email' is required"
+      required:
+        - code
+        - message
+
+    # Success response schema
+    SuccessResponse:
+      type: object
+      properties:
+        code:
+          type: integer
+          description: Success code (always 0)
+          example: 0
+        message:
+          type: string
+          description: Success message
+          example: "success"
+        data:
+          type: object
+          description: Response data
+
+    # User model
+    User:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: User unique identifier
+          example: 1
+        phone:
+          type: string
+          description: User phone number (11 digits)
+          pattern: '^\d{11}$'
+          example: "13800138000"
+        nickname:
+          type: string
+          description: User display name
+          minLength: 2
+          maxLength: 50
+          example: "John Doe"
+        avatar:
+          type: string
+          description: Avatar image URL
+          example: "avatars/user123.png"
+        gender:
+          type: integer
+          description: User gender (0=unset, 1=male, 2=female)
+          enum: [0, 1, 2]
+          example: 1
+        signature:
+          type: string
+          description: Personal signature
+          maxLength: 200
+          example: "Hello, I'm using GoChat!"
+        created_at:
+          type: string
+          format: date-time
+          description: Account creation time
+          example: "2023-01-01T00:00:00Z"
+        updated_at:
+          type: string
+          format: date-time
+          description: Last profile update time
+          example: "2023-06-01T12:30:00Z"
+      required:
+        - id
+        - phone
+        - nickname
+
+    # Message model
+    Message:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Message unique identifier
+          example: 123
+        from_user_id:
+          type: integer
+          format: int64
+          description: Sender user ID
+          example: 1
+        to_user_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: Receiver user ID (for private messages)
+          example: 2
+        group_id:
+          type: integer
+          format: int64
+          nullable: true
+          description: Group ID (for group messages)
+          example: 5
+        content:
+          type: string
+          description: Message content
+          example: "Hello, how are you?"
+        msg_type:
+          type: integer
+          description: Message type (1=text, 2=image, 3=voice, 4=video)
+          enum: [1, 2, 3, 4]
+          example: 1
+        created_at:
+          type: string
+          format: date-time
+          description: Message creation time
+          example: "2023-06-01T12:30:00Z"
+      required:
+        - id
+        - from_user_id
+        - content
+        - msg_type
+        - created_at
+
+    # Group model
+    Group:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Group unique identifier
+          example: 1
+        name:
+          type: string
+          description: Group name
+          minLength: 1
+          maxLength: 50
+          example: "Development Team"
+        owner_id:
+          type: integer
+          format: int64
+          description: Group owner user ID
+          example: 1
+        member_count:
+          type: integer
+          description: Number of group members
+          example: 5
+        created_at:
+          type: string
+          format: date-time
+          description: Group creation time
+          example: "2023-01-01T00:00:00Z"
+      required:
+        - id
+        - name
+        - owner_id
+        - member_count
+
+    # Conversation model
+    Conversation:
+      type: object
+      properties:
+        id:
+          type: integer
+          format: int64
+          description: Conversation unique identifier
+          example: 1
+        user_id:
+          type: integer
+          format: int64
+          description: User ID this conversation belongs to
+          example: 1
+        type:
+          type: integer
+          description: Conversation type (1=private, 2=group)
+          enum: [1, 2]
+          example: 1
+        target_id:
+          type: integer
+          format: int64
+          description: Target user ID (private) or group ID (group)
+          example: 2
+        unread_count:
+          type: integer
+          description: Number of unread messages
+          example: 3
+        last_message:
+          $ref: '#/components/schemas/Message'
+        updated_at:
+          type: string
+          format: date-time
+          description: Last update time
+          example: "2023-06-01T12:30:00Z"
+      required:
+        - id
+        - user_id
+        - type
+        - target_id
+        - unread_count
+
+# API Paths
+paths:
+  # Health check endpoint
+  /health:
+    get:
+      summary: Health check
+      description: Check if the API service is running
+      operationId: healthCheck
+      tags:
+        - System
+      responses:
+        '200':
+          description: Service is healthy
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: "ok"
+                  message:
+                    type: string
+                    example: "Service is running"
+
+  # Authentication endpoints
+  /auth/register:
+    post:
+      summary: User registration
+      description: Register a new user account with phone number and password
+      operationId: registerUser
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone:
+                  type: string
+                  pattern: '^\d{11}$'
+                  description: 11-digit phone number
+                  example: "13800138000"
+                password:
+                  type: string
+                  minLength: 6
+                  maxLength: 20
+                  description: Password (6-20 characters)
+                  example: "123456"
+                nickname:
+                  type: string
+                  minLength: 2
+                  maxLength: 20
+                  description: User nickname
+                  example: "John Doe"
+              required:
+                - phone
+                - password
+                - nickname
+            examples:
+              valid_registration:
+                summary: Valid registration request
+                value:
+                  phone: "13800138000"
+                  password: "123456"
+                  nickname: "John Doe"
+      responses:
+        '200':
+          description: Registration successful
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          user_id:
+                            type: integer
+                            format: int64
+                            example: 1
+                          token:
+                            type: string
+                            example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        '400':
+          description: Invalid input data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                validation_error:
+                  summary: Validation error
+                  value:
+                    code: "VALIDATION_ERROR"
+                    message: "Phone must be a valid 11-digit phone number"
+        '409':
+          description: User already exists
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: "USER_EXISTS"
+                message: "User with this phone number already exists"
+
+  /auth/login:
+    post:
+      summary: User login
+      description: Authenticate user and receive JWT token
+      operationId: loginUser
+      tags:
+        - Authentication
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                phone:
+                  type: string
+                  pattern: '^\d{11}$'
+                  description: 11-digit phone number
+                  example: "13800138000"
+                password:
+                  type: string
+                  description: User password
+                  example: "123456"
+              required:
+                - phone
+                - password
+            examples:
+              valid_login:
+                summary: Valid login request
+                value:
+                  phone: "13800138000"
+                  password: "123456"
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          user:
+                            $ref: '#/components/schemas/User'
+                          token:
+                            type: string
+                            description: JWT token valid for 7 days
+                            example: "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9..."
+        '401':
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: "INVALID_PASSWORD"
+                message: "Invalid phone number or password"
+
+  /auth/logout:
+    post:
+      summary: User logout
+      description: Logout user and invalidate JWT token
+      operationId: logoutUser
+      tags:
+        - Authentication
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Logout successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              example:
+                code: "UNAUTHORIZED"
+                message: "Authentication required"
+
+  # User management endpoints
+  /user/profile:
+    get:
+      summary: Get user profile
+      description: Retrieve current user's profile information
+      operationId: getUserProfile
+      tags:
+        - User Management
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Profile retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    put:
+      summary: Update user profile
+      description: Update current user's profile information
+      operationId: updateUserProfile
+      tags:
+        - User Management
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                nickname:
+                  type: string
+                  minLength: 2
+                  maxLength: 20
+                  description: User nickname
+                  example: "John Smith"
+                gender:
+                  type: integer
+                  enum: [0, 1, 2]
+                  description: User gender (0=unset, 1=male, 2=female)
+                  example: 1
+                signature:
+                  type: string
+                  maxLength: 200
+                  description: Personal signature
+                  example: "Hello world!"
+            examples:
+              profile_update:
+                summary: Profile update request
+                value:
+                  nickname: "John Smith"
+                  gender: 1
+                  signature: "Software developer"
+      responses:
+        '200':
+          description: Profile updated successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/User'
+        '400':
+          description: Invalid input data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /user/upload-avatar:
+    post:
+      summary: Upload user avatar
+      description: Upload a new avatar image for the current user
+      operationId: uploadAvatar
+      tags:
+        - User Management
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                avatar:
+                  type: string
+                  format: binary
+                  description: Avatar image file (JPG, PNG, GIF)
+              required:
+                - avatar
+      responses:
+        '200':
+          description: Avatar uploaded successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          avatar_url:
+                            type: string
+                            description: URL of the uploaded avatar
+                            example: "avatars/user123_avatar.png"
+        '400':
+          description: Invalid file or file size too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /user/search:
+    get:
+      summary: Search users
+      description: Search for users by phone number or nickname
+      operationId: searchUsers
+      tags:
+        - User Management
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: keyword
+          in: query
+          required: true
+          description: Search keyword (phone number or nickname)
+          schema:
+            type: string
+            minLength: 1
+          example: "john"
+        - name: page
+          in: query
+          required: false
+          description: Page number (default 1)
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: page_size
+          in: query
+          required: false
+          description: Number of results per page (default 20, max 100)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          example: 10
+      responses:
+        '200':
+          description: Search results
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          users:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/User'
+                          total:
+                            type: integer
+                            description: Total number of matching users
+                            example: 5
+                          page:
+                            type: integer
+                            description: Current page number
+                            example: 1
+                          page_size:
+                            type: integer
+                            description: Results per page
+                            example: 10
+        '400':
+          description: Invalid search parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Friend management endpoints
+  /friend/list:
+    get:
+      summary: Get friend list
+      description: Retrieve current user's friend list
+      operationId: getFriendList
+      tags:
+        - Friend Management
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Friend list retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          friends:
+                            type: array
+                            items:
+                              allOf:
+                                - $ref: '#/components/schemas/User'
+                                - type: object
+                                  properties:
+                                    friend_since:
+                                      type: string
+                                      format: date-time
+                                      description: When they became friends
+                                      example: "2023-01-01T00:00:00Z"
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /friend/add:
+    post:
+      summary: Add friend
+      description: Send a friend request or add a friend directly
+      operationId: addFriend
+      tags:
+        - Friend Management
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                friend_id:
+                  type: integer
+                  format: int64
+                  description: ID of the user to add as friend
+                  example: 2
+                message:
+                  type: string
+                  maxLength: 200
+                  description: Optional friend request message
+                  example: "Hi, let's be friends!"
+              required:
+                - friend_id
+            examples:
+              add_friend:
+                summary: Add friend request
+                value:
+                  friend_id: 2
+                  message: "Hi, I'd like to add you as a friend!"
+      responses:
+        '200':
+          description: Friend added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid friend ID or already friends
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: User not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /friend/{id}:
+    delete:
+      summary: Remove friend
+      description: Remove a user from friend list
+      operationId: removeFriend
+      tags:
+        - Friend Management
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Friend user ID to remove
+          schema:
+            type: integer
+            format: int64
+          example: 2
+      responses:
+        '200':
+          description: Friend removed successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid friend ID
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Friend relationship not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Group management endpoints
+  /group/create:
+    post:
+      summary: Create group
+      description: Create a new chat group
+      operationId: createGroup
+      tags:
+        - Group Management
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                  minLength: 1
+                  maxLength: 50
+                  description: Group name
+                  example: "Development Team"
+                member_ids:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                  description: Initial member user IDs (optional)
+                  example: [2, 3, 4]
+              required:
+                - name
+            examples:
+              create_group:
+                summary: Create group request
+                value:
+                  name: "Development Team"
+                  member_ids: [2, 3, 4]
+      responses:
+        '200':
+          description: Group created successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Group'
+        '400':
+          description: Invalid input data
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /group/{id}:
+    get:
+      summary: Get group information
+      description: Retrieve detailed information about a group
+      operationId: getGroup
+      tags:
+        - Group Management
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Group ID
+          schema:
+            type: integer
+            format: int64
+          example: 1
+      responses:
+        '200':
+          description: Group information retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        $ref: '#/components/schemas/Group'
+        '404':
+          description: Group not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /group/{id}/members:
+    get:
+      summary: Get group members
+      description: Retrieve list of group members
+      operationId: getGroupMembers
+      tags:
+        - Group Management
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Group ID
+          schema:
+            type: integer
+            format: int64
+          example: 1
+      responses:
+        '200':
+          description: Group members retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          members:
+                            type: array
+                            items:
+                              allOf:
+                                - $ref: '#/components/schemas/User'
+                                - type: object
+                                  properties:
+                                    joined_at:
+                                      type: string
+                                      format: date-time
+                                      description: When they joined the group
+                                      example: "2023-01-01T00:00:00Z"
+        '404':
+          description: Group not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+    post:
+      summary: Add group members
+      description: Add new members to a group (owner only)
+      operationId: addGroupMembers
+      tags:
+        - Group Management
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Group ID
+          schema:
+            type: integer
+            format: int64
+          example: 1
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                member_ids:
+                  type: array
+                  items:
+                    type: integer
+                    format: int64
+                  description: User IDs to add to the group
+                  example: [5, 6]
+              required:
+                - member_ids
+            examples:
+              add_members:
+                summary: Add members request
+                value:
+                  member_ids: [5, 6]
+      responses:
+        '200':
+          description: Members added successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '400':
+          description: Invalid member IDs or users already in group
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '403':
+          description: Only group owner can add members
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '404':
+          description: Group not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Conversation endpoints
+  /conversation/list:
+    get:
+      summary: Get conversation list
+      description: Retrieve user's conversation list with last messages and unread counts
+      operationId: getConversations
+      tags:
+        - Conversations
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          required: false
+          description: Page number (default 1)
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: page_size
+          in: query
+          required: false
+          description: Number of conversations per page (default 20, max 100)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          example: 20
+      responses:
+        '200':
+          description: Conversation list retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          conversations:
+                            type: array
+                            items:
+                              $ref: '#/components/schemas/Conversation'
+                          total:
+                            type: integer
+                            description: Total number of conversations
+                            example: 10
+                          page:
+                            type: integer
+                            description: Current page number
+                            example: 1
+                          page_size:
+                            type: integer
+                            description: Conversations per page
+                            example: 20
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /conversation/{id}/clear-unread:
+    post:
+      summary: Clear unread count
+      description: Mark all messages in a conversation as read
+      operationId: clearUnreadMessages
+      tags:
+        - Conversations
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Conversation ID
+          schema:
+            type: integer
+            format: int64
+          example: 1
+      responses:
+        '200':
+          description: Unread count cleared successfully
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/SuccessResponse'
+        '404':
+          description: Conversation not found
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Message endpoints
+  /message/history:
+    get:
+      summary: Get message history
+      description: Retrieve message history for private chat or group chat
+      operationId: getMessageHistory
+      tags:
+        - Messages
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: type
+          in: query
+          required: true
+          description: Message type (private or group)
+          schema:
+            type: string
+            enum: [private, group]
+          example: private
+        - name: target_id
+          in: query
+          required: true
+          description: Target user ID (for private) or group ID (for group)
+          schema:
+            type: integer
+            format: int64
+          example: 2
+        - name: page
+          in: query
+          required: false
+          description: Page number (default 1)
+          schema:
+            type: integer
+            minimum: 1
+            default: 1
+          example: 1
+        - name: page_size
+          in: query
+          required: false
+          description: Number of messages per page (default 20, max 100)
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 100
+            default: 20
+          example: 20
+      responses:
+        '200':
+          description: Message history retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          messages:
+                            type: array
+                            items:
+                              allOf:
+                                - $ref: '#/components/schemas/Message'
+                                - type: object
+                                  properties:
+                                    sender_info:
+                                      type: object
+                                      properties:
+                                        nickname:
+                                          type: string
+                                          example: "John Doe"
+                                        avatar:
+                                          type: string
+                                          example: "avatars/user123.png"
+                          total:
+                            type: integer
+                            description: Total number of messages
+                            example: 150
+                          page:
+                            type: integer
+                            description: Current page number
+                            example: 1
+                          page_size:
+                            type: integer
+                            description: Messages per page
+                            example: 20
+        '400':
+          description: Invalid parameters
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # Online status endpoints
+  /online/status:
+    get:
+      summary: Get user online status
+      description: Check if a specific user is online
+      operationId: getUserOnlineStatus
+      tags:
+        - Online Status
+      security:
+        - bearerAuth: []
+      parameters:
+        - name: user_id
+          in: query
+          required: true
+          description: User ID to check
+          schema:
+            type: integer
+            format: int64
+          example: 2
+      responses:
+        '200':
+          description: Online status retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          user_id:
+                            type: integer
+                            format: int64
+                            example: 2
+                          online:
+                            type: boolean
+                            description: Whether the user is online
+                            example: true
+                          last_seen:
+                            type: string
+                            format: date-time
+                            description: Last seen time (if offline)
+                            example: "2023-06-01T12:30:00Z"
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /online/users:
+    get:
+      summary: Get online users
+      description: Get list of currently online users (friends only)
+      operationId: getOnlineUsers
+      tags:
+        - Online Status
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Online users list retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          online_users:
+                            type: array
+                            items:
+                              type: object
+                              properties:
+                                user_id:
+                                  type: integer
+                                  format: int64
+                                  example: 2
+                                nickname:
+                                  type: string
+                                  example: "John Doe"
+                                avatar:
+                                  type: string
+                                  example: "avatars/user123.png"
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  /online/count:
+    get:
+      summary: Get online user count
+      description: Get total number of currently online users
+      operationId: getOnlineCount
+      tags:
+        - Online Status
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: Online count retrieved successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          count:
+                            type: integer
+                            description: Number of online users
+                            example: 25
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+  # File upload endpoints
+  /upload/image:
+    post:
+      summary: Upload chat image
+      description: Upload an image for use in chat messages
+      operationId: uploadChatImage
+      tags:
+        - File Upload
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              properties:
+                image:
+                  type: string
+                  format: binary
+                  description: Image file (JPG, PNG, GIF, max 10MB)
+              required:
+                - image
+      responses:
+        '200':
+          description: Image uploaded successfully
+          content:
+            application/json:
+              schema:
+                allOf:
+                  - $ref: '#/components/schemas/SuccessResponse'
+                  - type: object
+                    properties:
+                      data:
+                        type: object
+                        properties:
+                          file_id:
+                            type: integer
+                            format: int64
+                            description: File ID for referencing
+                            example: 123
+                          file_url:
+                            type: string
+                            description: URL to access the uploaded image
+                            example: "images/abc123.jpg"
+                          file_size:
+                            type: integer
+                            description: File size in bytes
+                            example: 1024000
+        '400':
+          description: Invalid file or file too large
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+              examples:
+                invalid_file:
+                  summary: Invalid file type
+                  value:
+                    code: "BAD_REQUEST"
+                    message: "Only JPG, PNG, and GIF files are allowed"
+                file_too_large:
+                  summary: File too large
+                  value:
+                    code: "BAD_REQUEST"
+                    message: "File size must be less than 10MB"
+        '401':
+          description: Authentication required
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ErrorResponse'
+
+# Tags for organization
+tags:
+  - name: System
+    description: System health and status endpoints
+  - name: Authentication
+    description: User authentication and authorization
+  - name: User Management
+    description: User profile and account management
+  - name: Friend Management
+    description: Friend relationships and management
+  - name: Group Management
+    description: Group chat creation and management
+  - name: Conversations
+    description: Conversation list and management
+  - name: Messages
+    description: Message history and retrieval
+  - name: Online Status
+    description: User online status and presence
+  - name: File Upload
+    description: File upload and management
+
+# Global security requirement (most endpoints require auth)
+security:
+  - bearerAuth: []

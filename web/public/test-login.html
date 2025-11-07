@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>登录测试</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            max-width: 600px;
+            margin: 50px auto;
+            padding: 20px;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+        label {
+            display: block;
+            margin-bottom: 5px;
+        }
+        input {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 10px 20px;
+            background-color: #1890ff;
+            color: white;
+            border: none;
+            cursor: pointer;
+        }
+        button:hover {
+            background-color: #0066cc;
+        }
+        #result {
+            margin-top: 20px;
+            padding: 15px;
+            background-color: #f5f5f5;
+            border-radius: 4px;
+            white-space: pre-wrap;
+            word-wrap: break-word;
+        }
+        .success { color: green; }
+        .error { color: red; }
+    </style>
+</head>
+<body>
+    <h1>IM系统登录测试</h1>
+
+    <form id="loginForm">
+        <div class="form-group">
+            <label for="phone">手机号:</label>
+            <input type="text" id="phone" value="13800138000" required>
+        </div>
+
+        <div class="form-group">
+            <label for="password">密码:</label>
+            <input type="password" id="password" value="123456" required>
+        </div>
+
+        <button type="submit">测试登录</button>
+    </form>
+
+    <div id="result"></div>
+
+    <script>
+        const resultDiv = document.getElementById('result');
+        const form = document.getElementById('loginForm');
+
+        form.addEventListener('submit', async (e) => {
+            e.preventDefault();
+
+            const phone = document.getElementById('phone').value;
+            const password = document.getElementById('password').value;
+
+            resultDiv.innerHTML = '正在测试...\n';
+
+            try {
+                const response = await fetch('http://localhost:8080/api/v1/auth/login', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({ phone, password })
+                });
+
+                const data = await response.json();
+
+                resultDiv.innerHTML = `<div class="success">✓ 请求成功!</div>\n\n`;
+                resultDiv.innerHTML += `HTTP状态码: ${response.status}\n\n`;
+                resultDiv.innerHTML += `响应数据:\n${JSON.stringify(data, null, 2)}`;
+
+                if (data.code === 0 && data.data && data.data.token) {
+                    resultDiv.innerHTML += `\n\n<div class="success">✓ 登录成功! Token已获取</div>`;
+                    console.log('Token:', data.data.token);
+                    console.log('User Info:', data.data.user_info);
+                } else {
+                    resultDiv.innerHTML += `\n\n<div class="error">✗ 登录失败: ${data.message}</div>`;
+                }
+
+            } catch (error) {
+                resultDiv.innerHTML = `<div class="error">✗ 请求失败!</div>\n\n`;
+                resultDiv.innerHTML += `错误信息: ${error.message}\n\n`;
+                resultDiv.innerHTML += `错误详情: ${error.stack}`;
+                console.error('Login error:', error);
+            }
+        });
+
+        // 页面加载时测试后端连接
+        window.addEventListener('load', async () => {
+            try {
+                const response = await fetch('http://localhost:8080/api/v1/health');
+                const data = await response.json();
+                console.log('后端健康检查:', data);
+            } catch (error) {
+                console.error('无法连接到后端:', error);
+                alert('警告: 无法连接到后端服务器! 请确保后端运行在 http://localhost:8080');
+            }
+        });
+    </script>
+</body>
+</html>
