@@ -1,0 +1,98 @@
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: gochat-mysql
+    restart: always
+    environment:
+      MYSQL_ROOT_PASSWORD: root123
+      MYSQL_DATABASE: im_db
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+      - ./scripts:/docker-entrypoint-initdb.d
+    command:
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      - --default-authentication-plugin=mysql_native_password
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      timeout: 20s
+      retries: 10
+
+  redis:
+    image: redis:6.0
+    container_name: gochat-redis
+    restart: always
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  gochat:
+    build: ./server
+    container_name: gochat
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      mysql:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    environment:
+      - DB_HOST=mysql
+      - DB_PORT=3306
+      - DB_USER=root
+      - DB_PASSWORD=root123
+      - DB_NAME=im_db
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - JWT_SECRET=your-secret-key-change-in-production
+      - SERVER_PORT=8080
+    volumes:
+      - ./server/config.yaml:/app/config.yaml:ro
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/api/v1/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  nginx:
+    image: nginx:alpine
+    container_name: gochat-nginx
+    restart: always
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - gochat
+    profiles:
+      - frontend  # 只在需要前端时启动
+
+  web-frontend:
+    build: ./web
+    container_name: gochat-web
+    restart: always
+    ports:
+      - "3000:3000"
+    depends_on:
+      - gochat
+    environment:
+      - REACT_APP_API_BASE_URL=http://localhost:8080/api/v1
+      - REACT_APP_WS_BASE_URL=ws://localhost:8080/ws
+    profiles:
+      - frontend  # 只在需要前端时启动
+
+volumes:
+  mysql_data:
+    driver: local
+  redis_data:
+    driver: local
