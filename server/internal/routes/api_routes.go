@@ -10,9 +10,6 @@ import (
 )
 
 func SetupAPIRoutes(r *gin.Engine, cfg *config.Config) {
-	// 静态文件服务
-	r.Static("/uploads", "./uploads")
-
 	// 创建处理器
 	authHandler := handlers.NewAuthHandler(cfg)
 	userHandler := handlers.NewUserHandler(cfg)
@@ -30,6 +27,9 @@ func SetupAPIRoutes(r *gin.Engine, cfg *config.Config) {
 	r.Use(middleware.CORS(&cfg.CORS))          // 跨域（使用配置）
 	r.Use(middleware.RequestLogger())          // 日志
 	r.Use(middleware.Recovery())               // 错误恢复
+
+	// 静态文件服务 - 移动到CORS中间件之后
+	r.Static("/uploads", "./uploads")
 
 	// 配置速率限制
 	rateLimitConfig := &middleware.RateLimitConfig{

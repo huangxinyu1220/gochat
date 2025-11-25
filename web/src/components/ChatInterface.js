@@ -405,10 +405,7 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
     // 如果传入了消息内容（比如图片URL），直接使用；否则从输入框获取
     const content = messageContent || inputValue.trim();
 
-    if (!content || !wsClient || !isConnected) {
-      if (!isConnected) {
-        message.error('连接未建立，无法发送消息');
-      }
+    if (!content || !wsClient) {
       return;
     }
 
@@ -475,7 +472,7 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
       }
     };
 
-    // 添加到document级别��听
+    // 添加到document级别监听
     document.addEventListener('keydown', handleGlobalKeyDown);
 
     return () => {
@@ -767,7 +764,8 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
                         marginTop: '2px',
                         marginBottom: '2px',
                         marginLeft: '2px',
-                        minHeight: '16px',
+                        height: '16px',
+                        lineHeight: '16px',
                       }}>
                         <span style={{
                           fontSize: '12px',

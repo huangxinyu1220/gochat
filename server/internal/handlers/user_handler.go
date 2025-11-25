@@ -115,8 +115,8 @@ func (h *UserHandler) UploadAvatar(c *gin.Context) {
 		return
 	}
 
-	// 使用FileService上传文件（自动去重）
-	result, err := h.fileService.UploadFile(file, fileHeader, userID.(int64), "avatar", "uploads/avatars")
+	// 使用FileService上传文件（统一存储目录，自动去重）
+	result, err := h.fileService.UploadFile(file, fileHeader, userID.(int64), "avatar", "")
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, utils.ErrorResponse(500, fmt.Sprintf("Failed to upload file: %v", err)))
 		return
@@ -130,12 +130,9 @@ func (h *UserHandler) UploadAvatar(c *gin.Context) {
 		h.fileService.DeleteReference(0, userID.(int64), "avatar")
 	}
 
-	// 提取文件名（用于兼容前端）
-	filename := filepath.Base(result.URL)
-
-	// 更新用户头像
+	// 更新用户头像（存储完整路径）
 	req := &services.UpdateProfileRequest{
-		Avatar: filename,
+		Avatar: result.URL, // 存储完整路径而不是仅文件名
 	}
 
 	err = h.userService.UpdateProfile(userID.(int64), req)
@@ -146,11 +143,12 @@ func (h *UserHandler) UploadAvatar(c *gin.Context) {
 		return
 	}
 
-	// 返回文件URL和去重信息
+	// 返回统一文件路径和去重信息
 	response := map[string]interface{}{
 		"avatar_url":   "/" + result.URL,
 		"message":      "Avatar uploaded successfully",
 		"deduplicated": result.IsDedup,
+		"storage_path": result.URL, // 添加完整路径信息
 	}
 
 	if result.IsDedup {

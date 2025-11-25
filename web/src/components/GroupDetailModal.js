@@ -12,6 +12,16 @@ const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberI
   const [selectedFriends, setSelectedFriends] = useState([]);
   const [addingMembers, setAddingMembers] = useState(false);
 
+  // 获取头像URL - 统一使用uploads/files目录
+  const getAvatarSrc = (avatar) => {
+    if (!avatar || avatar === 'default.png') {
+      return null;
+    }
+
+    const baseURL = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
+    return `${baseURL}/uploads/files/${avatar}`;
+  };
+
   useEffect(() => {
     if (visible && groupId) {
       loadGroupInfo();
@@ -158,8 +168,8 @@ const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberI
                 <List.Item.Meta
                   avatar={
                     <Avatar
-                      src={member.avatar ? `/uploads/avatars/${member.avatar}` : null}
-                      icon={!member.avatar && <UserOutlined />}
+                      src={getAvatarSrc(member.avatar)}
+                      icon={<UserOutlined />}
                     />
                   }
                   title={
@@ -211,8 +221,8 @@ const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberI
                       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', width: '100%' }}>
                         <div style={{ display: 'flex', alignItems: 'center' }}>
                           <Avatar
-                            src={friend.avatar ? `/uploads/avatars/${friend.avatar}` : null}
-                            icon={!friend.avatar && <UserOutlined />}
+                            src={getAvatarSrc(friend.avatar)}
+                            icon={<UserOutlined />}
                             style={{ marginRight: 8 }}
                           />
                           <span style={{ color: isInGroup ? '#999' : '#333' }}>

@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/golang-jwt/jwt/v5"
 	"golang.org/x/crypto/bcrypt"
@@ -102,7 +103,9 @@ func ValidatePassword(password string) bool {
 
 // ValidateNickname 验证昵称
 func ValidateNickname(nickname string) bool {
-	return len(nickname) >= 2 && len(nickname) <= 20
+	// 使用utf8.RuneCountInString来正确计算Unicode字符数量，而不是字节数
+	runeCount := utf8.RuneCountInString(nickname)
+	return runeCount >= 2 && runeCount <= 20
 }
 
 // FormatResponse 格式化API响应

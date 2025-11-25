@@ -11,6 +11,16 @@ const ConversationsPage = () => {
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(true);
 
+  // 获取头像URL - 统一使用uploads/files目录
+  const getAvatarSrc = (avatar) => {
+    if (!avatar || avatar === 'default.png') {
+      return null;
+    }
+
+    const baseURL = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
+    return `${baseURL}/uploads/files/${avatar}`;
+  };
+
   // 加载会话列表
   const loadConversations = async () => {
     try {
@@ -126,7 +136,7 @@ const ConversationsPage = () => {
                   avatar={
                     <Badge count={conversation.unread_count} overflowCount={99}>
                       <Avatar
-                        src={conversation.target_avatar}
+                        src={getAvatarSrc(conversation.target_avatar)}
                         icon={getConversationIcon(conversation.type)}
                       >
                         {conversation.target_name && conversation.target_name[0]}

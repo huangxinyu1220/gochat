@@ -59,8 +59,36 @@ func (s *GroupService) AddGroupMember(groupID, userID int64) error {
 
 // 移除群成员
 func (s *GroupService) RemoveGroupMember(groupID, userID int64) error {
-	return s.db.Where("group_id = ? AND user_id = ?", groupID, userID).
-		Delete(&models.GroupMember{}).Error
+	// 开启事务确保数据一致性
+	tx := s.db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	// 删除群成员记录
+	if err := tx.Where("group_id = ? AND user_id = ?", groupID, userID).
+		Delete(&models.GroupMember{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	// 删除对应的会话记录
+	if err := tx.Where("user_id = ? AND type = 2 AND target_id = ?", userID, groupID).
+		Delete(&models.Conversation{}).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	// 更新群成员数量
+	if err := tx.Model(&models.Group{}).Where("id = ?", groupID).
+		Update("member_count", gorm.Expr("member_count - 1")).Error; err != nil {
+		tx.Rollback()
+		return err
+	}
+
+	return tx.Commit().Error
 }
 
 // 获取群组信息
@@ -183,6 +211,8 @@ func (s *GroupService) AddGroupMembers(groupID int64, userIDs []int64) error {
 	}()
 
 	addedCount := 0
+	addedUserIDs := []int64{}
+
 	// 添加成员
 	for _, userID := range userIDs {
 		// 检查成员是否已存在
@@ -202,7 +232,22 @@ func (s *GroupService) AddGroupMembers(groupID int64, userIDs []int64) error {
 			tx.Rollback()
 			return err
 		}
+
+		// 为新成员创建群会话
+		conversation := &models.Conversation{
+			UserID:      userID,
+			Type:        models.ConversationTypeGroup,
+			TargetID:    groupID,
+			UnreadCount: 0,
+			UpdatedAt:   time.Now(),
+		}
+		if err := tx.Create(conversation).Error; err != nil {
+			tx.Rollback()
+			return err
+		}
+
 		addedCount++
+		addedUserIDs = append(addedUserIDs, userID)
 	}
 
 	// 更新群成员数量（只增加实际添加的成员数量）

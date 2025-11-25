@@ -3,6 +3,8 @@ import { Modal, Form, Input, Button, Avatar, Row, Col, Select, Tooltip, App } fr
 import { UserOutlined, CameraOutlined, LoadingOutlined } from '@ant-design/icons';
 import { userAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { createNicknameValidator } from '../utils/validation';
+import { getAvatarSrc, updateAvatarCacheVersion } from '../utils/avatar';
 
 const ProfileEditModal = ({ visible, onCancel, onSuccess }) => {
   const { message } = App.useApp(); // 使用 App.useApp() 获取 message 实例
@@ -14,13 +16,10 @@ const ProfileEditModal = ({ visible, onCancel, onSuccess }) => {
   const [avatarFile, setAvatarFile] = useState(null);
   const fileInputRef = useRef(null);
 
-  // 获取头像显示URL
-  const getAvatarSrc = () => {
+  // 获取头像显示URL（优化缓存机制）
+  const getCurrentAvatarSrc = () => {
     if (previewAvatar) return previewAvatar;
-    if (user?.avatar && user.avatar !== 'default.png') {
-      return `${process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080'}/uploads/avatars/${user.avatar}`;
-    }
-    return null;
+    return getAvatarSrc(user?.avatar);
   };
 
   // 处理头像文件选择
@@ -98,6 +97,15 @@ const ProfileEditModal = ({ visible, onCancel, onSuccess }) => {
       };
       updateUser(updatedUser);
 
+      // 如果头像有更新，刷新全局头像缓存
+      if (avatarFile) {
+        updateAvatarCacheVersion();
+      }
+
+      // 清除预览状态，强制使用新的头像
+      setPreviewAvatar(null);
+      setAvatarFile(null);
+
       message.success('个人信息更新成功！');
       onSuccess?.(updatedUser);
       onCancel();
@@ -147,7 +155,7 @@ const ProfileEditModal = ({ visible, onCancel, onSuccess }) => {
           <div style={{ position: 'relative', display: 'inline-block' }}>
             <Avatar
               size={80}
-              src={getAvatarSrc()}
+              src={getCurrentAvatarSrc()}
               icon={<UserOutlined />}
               style={{
                 cursor: 'pointer',
@@ -213,7 +221,7 @@ const ProfileEditModal = ({ visible, onCancel, onSuccess }) => {
               name="nickname"
               rules={[
                 { required: true, message: '请输入昵称' },
-                { min: 2, max: 20, message: '昵称长度为2-20个字符' },
+                { validator: createNicknameValidator(2, 20) },
               ]}
             >
               <Input placeholder="请输入昵称" />
