@@ -21,7 +21,8 @@ redis:
 jwt:
   # JWT密钥必须设置！推荐使用环境变量 JWT_SECRET
   # 示例：export JWT_SECRET="your-very-long-and-secure-jwt-secret-key-at-least-32-characters-long"
-  # secret: "" # 请通过环境变量或此处配置安全的JWT密钥（至少32个字符）
+  # 生产环境请使用环境变量！下面仅为开发环境默认值
+  secret: "gochat-dev-jwt-secret-key-for-development-only-secure-2024-minimum-32-chars"
   expire_hours: 168  # 7天
 
 websocket:

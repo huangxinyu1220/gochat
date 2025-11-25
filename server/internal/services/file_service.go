@@ -19,6 +19,9 @@ import (
 	"gochat/internal/models"
 )
 
+// 统一文件存储目录
+const FileStorageDir = "uploads/files"
+
 type FileService struct {
 	db *gorm.DB
 }
@@ -36,13 +39,13 @@ type UploadFileResult struct {
 	URL          string // 访问URL
 }
 
-// UploadFile 上传文件（自动去重）
+// UploadFile 上传文件（全局去重系统）
 func (s *FileService) UploadFile(
 	file multipart.File,
 	header *multipart.FileHeader,
 	userID int64,
 	refType string,
-	uploadDir string,
+	uploadDir string, // 为兼容性保留，实际使用统一目录
 ) (*UploadFileResult, error) {
 	log := logger.GetLogger()
 
@@ -62,26 +65,27 @@ func (s *FileService) UploadFile(
 		return nil, fmt.Errorf("failed to seek file: %w", err)
 	}
 
-	// 4. 检查文件是否已存在
+	// 4. 检查文件是否已存在（全局去重）
 	var existingFile models.FileStorage
 	result := s.db.Where("hash = ?", hash).First(&existingFile)
 
 	if result.Error == nil {
-		// 文件已存在，秒传！
-		log.Infof("文件秒传: hash=%s, 用户=%d, 类型=%s", hash[:16], userID, refType)
+		// 文件已存在，执行去重逻辑
+		log.Infof("文件去重命中: hash=%s, 用户=%d, 类型=%s", hash[:16], userID, refType)
 
 		// 增加引用计数
 		if err := s.IncrementRefCount(existingFile.ID); err != nil {
 			return nil, fmt.Errorf("failed to increment ref count: %w", err)
 		}
 
-		// 创建引用记录
+		// 创建新的引用记录
 		if err := s.CreateReference(existingFile.ID, userID, refType, 0); err != nil {
 			// 引用创建失败，回滚引用计数
 			s.DecrementRefCount(existingFile.ID)
 			return nil, fmt.Errorf("failed to create reference: %w", err)
 		}
 
+		// 返回现有文件信息
 		return &UploadFileResult{
 			FileStorage: &existingFile,
 			IsDedup:     true,
@@ -89,7 +93,7 @@ func (s *FileService) UploadFile(
 		}, nil
 	}
 
-	// 5. 文件不存在，需要保存新文件
+	// 5. 文件不存在，需要创建新文件
 	if !errors.Is(result.Error, gorm.ErrRecordNotFound) {
 		return nil, fmt.Errorf("database error: %w", result.Error)
 	}
@@ -100,17 +104,17 @@ func (s *FileService) UploadFile(
 		ext = ".bin"
 	}
 
-	// 7. 使用哈希值作为文件名
+	// 7. 使用统一存储目录和哈希值作为文件名
 	newFileName := fmt.Sprintf("%s%s", hash, ext)
-	storagePath := filepath.Join(uploadDir, newFileName)
+	storagePath := filepath.Join(FileStorageDir, newFileName)
 	fullPath := filepath.Join("./", storagePath)
 
-	// 8. 确保目录存在
+	// 8. 确保统一存储目录存在
 	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return nil, fmt.Errorf("failed to create directory: %w", err)
+		return nil, fmt.Errorf("failed to create storage directory: %w", err)
 	}
 
-	// 9. 保存文件到磁盘
+	// 9. 保存文件到统一存储目录
 	dst, err := os.Create(fullPath)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create file: %w", err)
@@ -129,7 +133,7 @@ func (s *FileService) UploadFile(
 		FileName:    header.Filename,
 		FileSize:    fileSize,
 		MimeType:    header.Header.Get("Content-Type"),
-		StoragePath: storagePath,
+		StoragePath: storagePath, // 统一存储路径
 		RefCount:    1,
 	}
 
@@ -146,8 +150,8 @@ func (s *FileService) UploadFile(
 		return nil, fmt.Errorf("failed to create reference: %w", err)
 	}
 
-	log.Infof("文件上传成功: hash=%s, size=%d, user=%d, type=%s",
-		hash[:16], fileSize, userID, refType)
+	log.Infof("文件上传成功: hash=%s, size=%d, user=%d, type=%s, path=%s",
+		hash[:16], fileSize, userID, refType, storagePath)
 
 	return &UploadFileResult{
 		FileStorage: newFile,
@@ -201,6 +205,17 @@ func (s *FileService) DecrementRefCount(fileID int64) error {
 
 // CreateReference 创建文件引用记录
 func (s *FileService) CreateReference(fileID, userID int64, refType string, refID int64) error {
+	// 检查是否已存在相同的引用记录
+	var existingRef models.FileReference
+	result := s.db.Where("file_id = ? AND user_id = ? AND ref_type = ?", fileID, userID, refType).
+		First(&existingRef)
+
+	if result.Error == nil {
+		// 已存在相同的引用记录，直接返回成功
+		return nil
+	}
+
+	// 不存在则创建新的引用记录
 	ref := &models.FileReference{
 		FileID:  fileID,
 		UserID:  userID,

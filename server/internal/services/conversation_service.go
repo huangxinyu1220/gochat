@@ -64,8 +64,13 @@ func (s *ConversationService) GetConversations(userID int64) ([]ConversationInfo
 		FROM conversations c
 		LEFT JOIN users u ON c.type = 1 AND c.target_id = u.id
 		LEFT JOIN ` + "`groups`" + ` g ON c.type = 2 AND c.target_id = g.id
+		LEFT JOIN group_members gm ON c.type = 2 AND c.target_id = gm.group_id AND gm.user_id = c.user_id
 		LEFT JOIN messages m ON c.last_msg_id = m.id
 		WHERE c.user_id = ?
+		AND (
+			c.type = 1
+			OR (c.type = 2 AND gm.user_id IS NOT NULL)
+		)
 		ORDER BY c.updated_at DESC
 	`, userID).Rows()
 	if err != nil {

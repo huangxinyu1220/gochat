@@ -118,14 +118,49 @@ start_dev() {
     # 启动后端
     log_info "Starting Go server..."
     go run main.go &
-    echo $! > ../server.pid
-
+    GO_PID=$!
+    echo $GO_PID > ../server.pid
     cd ..
 
-    # 等待后端启动
-    sleep 3
+    # 等待并检查后端是否启动成功
+    log_info "Waiting for Go server to start..."
+    max_retries=15
+    retry_count=0
+    while [ $retry_count -lt $max_retries ]; do
+        # 检查进程是否还在运行
+        if ! ps -p "$GO_PID" > /dev/null 2>&1; then
+            log_error "Go server process has exited unexpectedly"
+            if [ -f "server/logs/gochat.log" ]; then
+                log_error "Last few lines from log file:"
+                tail -n 10 server/logs/gochat.log
+            fi
+            exit 1
+        fi
 
-    log_info "Development environment started"
+        # 检查健康检查端点
+        if curl -s http://localhost:8080/api/v1/health > /dev/null 2>&1; then
+            log_info "Go server is running and responding"
+            break
+        fi
+
+        retry_count=$((retry_count + 1))
+        if [ $retry_count -ge $max_retries ]; then
+            log_error "Go server failed to start after ${max_retries} attempts"
+            log_error "Process ID: $GO_PID"
+            if [ -f "server/logs/gochat.log" ]; then
+                log_error "Last few lines from log file:"
+                tail -n 10 server/logs/gochat.log
+            fi
+            kill "$GO_PID" 2>/dev/null || true
+            rm -f "./server.pid"
+            exit 1
+        fi
+
+        log_info "Waiting for server to be ready... ($retry_count/$max_retries)"
+        sleep 2
+    done
+
+    log_info "Development environment started successfully!"
     log_info "API endpoints:"
     log_info "  Health: http://localhost:8080/api/v1/health"
     log_info "  WebSocket: ws://localhost:8080/ws"

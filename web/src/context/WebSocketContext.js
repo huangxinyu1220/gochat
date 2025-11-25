@@ -47,7 +47,11 @@ export const WebSocketProvider = ({ children }) => {
           reconnectMessageKeyRef.current = null;
         }
 
-        // 重连成功后也不显示提示，完全无感
+        // 检查是否有队列消息需要发送
+        const queueLength = client.getQueueLength();
+        if (queueLength > 0) {
+          message.success(`连接已恢复，正在发送${queueLength}条消息`, 2);
+        }
       });
 
       // 断开连接事件
@@ -72,12 +76,14 @@ export const WebSocketProvider = ({ children }) => {
       // 消息入队事件
       client.on('message-queued', (msg) => {
         console.log('[WebSocket] 消息已加入队列:', msg);
-        message.info('连接中断，消息已保存，将在重连后发送', 2);
+        // 优化用户体验：使用更温和的提示，并且减少频率
+        message.info('消息已发送，稍后将自动送达', 1.5);
       });
 
       // 队列消息发送成功事件
       client.on('message-sent-from-queue', (msg) => {
         console.log('[WebSocket] 队列消息已发送:', msg);
+        // 可以在这里触发UI更新，标记消息为已发送状态
       });
 
       // 设置事件监听器
@@ -185,10 +191,10 @@ export const WebSocketProvider = ({ children }) => {
 
   // 发送消息的便捷方法
   const sendChatMessage = (targetId, content) => {
-    if (!wsClient || !isConnected) {
-      message.error('连接未建立，无法发送消息');
+    if (!wsClient) {
       return false;
     }
+    // 信任WebSocketClient的队列机制，不显示连接错误给用户
     return wsClient.sendChatMessage(targetId, content);
   };
 

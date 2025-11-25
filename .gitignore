@@ -242,7 +242,6 @@ test.sqlite
 
 # Cache
 .cache/
-cache/
 
 # ===================================
 # Git 相关

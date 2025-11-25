@@ -1,16 +1,18 @@
 import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Form, Card, message, Modal } from 'antd';
+import { Form, Card, message } from 'antd';
 import { UserOutlined, LockOutlined, PhoneOutlined } from '@ant-design/icons';
 import { useAuth } from '../context/AuthContext';
 import { useDebounce, useFormValidation } from '../hooks/useFormHelpers';
+import { createNicknameValidator } from '../utils/validation';
 import AuthBackground from '../components/AuthBackground';
 import AuthFormTitle from '../components/AuthFormTitle';
 import AuthFormInput from '../components/AuthFormInput';
 import AuthButton from '../components/AuthButton';
 import AuthModeToggle from '../components/AuthModeToggle';
 import PasswordStrength from '../components/PasswordStrength';
-import ErrorAlert, { getErrorType } from '../components/ErrorAlert';
+import ResultModal, { RESULT_TYPES } from '../components/ResultModal';
+import { getErrorType } from '../components/ErrorAlert';
 import { CARD_STYLES, SIZES } from '../constants/styles';
 
 const AuthPage = () => {
@@ -18,7 +20,8 @@ const AuthPage = () => {
   const [form] = Form.useForm();
   const [isLogin, setIsLogin] = useState(true);
   const [successModalVisible, setSuccessModalVisible] = useState(false);
-  const [error, setError] = useState(null);
+  const [errorModalVisible, setErrorModalVisible] = useState(false);
+  const [errorDetails, setErrorDetails] = useState(null);
   const [password, setPassword] = useState('');
   const { login, register } = useAuth();
   const { validatePhone } = useFormValidation();
@@ -36,7 +39,7 @@ const AuthPage = () => {
 
   const onFinish = async (values) => {
     setLoading(true);
-    setError(null);
+    setErrorModalVisible(false);
 
     try {
       let result;
@@ -47,7 +50,17 @@ const AuthPage = () => {
           message.success('登录成功！');
           navigate('/');
         } else {
-          setError({ type: getErrorType(result), message: result.message });
+          const errorType = getErrorType(result);
+          const resultType = errorType === 'network' ? RESULT_TYPES.NETWORK : 
+                           errorType === 'validation' ? RESULT_TYPES.WARNING : 
+                           RESULT_TYPES.ERROR;
+          setErrorDetails({
+            type: resultType,
+            title: `${isLogin ? '登录' : '注册'}失败`,
+            message: result.message,
+            showRetry: errorType === 'network'
+          });
+          setErrorModalVisible(true);
         }
       } else {
         // 注册模式
@@ -55,14 +68,31 @@ const AuthPage = () => {
         if (result.success) {
           setSuccessModalVisible(true);
         } else {
-          setError({ type: getErrorType(result), message: result.message });
+          const errorType = getErrorType(result);
+          const resultType = errorType === 'network' ? RESULT_TYPES.NETWORK : 
+                           errorType === 'validation' ? RESULT_TYPES.WARNING : 
+                           RESULT_TYPES.ERROR;
+          setErrorDetails({
+            type: resultType,
+            title: `${isLogin ? '登录' : '注册'}失败`,
+            message: result.message,
+            showRetry: errorType === 'network'
+          });
+          setErrorModalVisible(true);
         }
       }
     } catch (error) {
-      setError({
-        type: getErrorType(error),
-        message: error.message || `${isLogin ? '登录' : '注册'}失败，请检查网络连接`
+      const errorType = getErrorType(error);
+      const resultType = errorType === 'network' ? RESULT_TYPES.NETWORK : 
+                       errorType === 'validation' ? RESULT_TYPES.WARNING : 
+                       RESULT_TYPES.ERROR;
+      setErrorDetails({
+        type: resultType,
+        title: `${isLogin ? '登录' : '注册'}失败`,
+        message: error.message || `${isLogin ? '登录' : '注册'}失败，请检查网络连接`,
+        showRetry: errorType === 'network'
       });
+      setErrorModalVisible(true);
     } finally {
       setLoading(false);
     }
@@ -75,15 +105,23 @@ const AuthPage = () => {
     setPassword('');
   };
 
+  const handleErrorOk = () => {
+    setErrorModalVisible(false);
+    setErrorDetails(null);
+  };
+
+  const handleErrorRetry = () => {
+    setErrorModalVisible(false);
+    // 重新提交表单
+    form.submit();
+  };
+
   const toggleMode = () => {
     setIsLogin(!isLogin);
     form.resetFields();
     setPassword('');
-    setError(null);
-  };
-
-  const handleRetry = () => {
-    setError(null);
+    setErrorModalVisible(false);
+    setErrorDetails(null);
   };
 
   const handlePhoneChange = (e) => {
@@ -107,16 +145,6 @@ const AuthPage = () => {
         }}
       >
         <AuthFormTitle isLogin={isLogin} />
-
-        {/* 错误提示 */}
-        {error && (
-          <ErrorAlert
-            type={error.type}
-            customMessage={error.message}
-            onRetry={handleRetry}
-            onClose={() => setError(null)}
-          />
-        )}
 
         <Form
           form={form}
@@ -151,8 +179,7 @@ const AuthPage = () => {
               name="nickname"
               rules={[
                 { required: true, message: '请输入昵称!' },
-                { min: 2, message: '昵称至少2位!' },
-                { max: 20, message: '昵称最多20位!' },
+                { validator: createNicknameValidator(2, 20) },
               ]}
               style={{ marginBottom: SIZES.spacing.md }}
             >
@@ -238,42 +265,28 @@ const AuthPage = () => {
       </Card>
 
       {/* 注册成功弹窗 */}
-      <Modal
-        title=""
-        open={successModalVisible}
+      <ResultModal
+        visible={successModalVisible}
+        type={RESULT_TYPES.SUCCESS}
+        title="注册成功！"
         onOk={handleConfirmSuccess}
-        onCancel={handleConfirmSuccess}
-        okText="确定"
-        cancelButtonProps={{ style: { display: 'none' } }}
         centered
         width={280}
-        style={{
-          fontFamily: 'system-ui, -apple-system, sans-serif',
-        }}
-        styles={{
-          content: {
-            borderRadius: SIZES.borderRadius.large,
-            background: 'rgba(255, 255, 255, 0.95)',
-            backdropFilter: 'blur(10px)',
-          },
-          body: {
-            padding: SIZES.spacing.lg,
-            textAlign: 'center',
-          },
-          footer: {
-            borderTop: '1px solid rgba(24, 144, 255, 0.1)',
-            textAlign: 'center',
-          },
-        }}
-      >
-        <div style={{
-          fontSize: '16px',
-          color: '#333',
-          fontWeight: '600',
-        }}>
-          注册成功！
-        </div>
-      </Modal>
+      />
+
+      {/* 错误提示弹窗 */}
+      {errorDetails && (
+        <ResultModal
+          visible={errorModalVisible}
+          type={errorDetails.type}
+          title={errorDetails.title}
+          description={errorDetails.message}
+          onOk={handleErrorOk}
+          onRetry={handleErrorRetry}
+          centered
+          width={280}
+        />
+      )}
     </AuthBackground>
   );
 };

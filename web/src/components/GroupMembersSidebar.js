@@ -1,144 +1,220 @@
 import React, { useState, useEffect } from 'react';
-import { List, Avatar, Spin, Typography, Divider } from 'antd';
-import { UserOutlined, CrownOutlined } from '@ant-design/icons';
+import { Avatar, List, Button, message, Badge } from 'antd';
+import { UserOutlined, CrownOutlined, CloseOutlined } from '@ant-design/icons';
 import { groupAPI } from '../services/api';
+import { useAuth } from '../context/AuthContext';
 
-const { Text } = Typography;
-
-/**
- * 群成员侧边栏组件 - 企业微信风格
- * @param {number} groupId - 群ID
- * @param {boolean} visible - 是否显示侧边栏
- */
-const GroupMembersSidebar = ({ groupId, visible }) => {
-  const [members, setMembers] = useState([]);
+const GroupMembersSidebar = ({ 
+  visible, 
+  groupId, 
+  onClose, 
+  groupMembers = [], 
+  onMembersUpdate,
+  currentUser 
+}) => {
   const [loading, setLoading] = useState(false);
-  const [ownerInfo, setOwnerInfo] = useState(null);
+  const [members, setMembers] = useState([]);
+  const { user } = useAuth();
 
-  // 加载群成员
-  useEffect(() => {
-    if (!groupId || !visible) return;
-
-    const loadMembers = async () => {
-      setLoading(true);
-      try {
-        const response = await groupAPI.getGroupMembers(groupId);
-        if (response.code === 0) {
-          const memberList = response.data || [];
-          setMembers(memberList);
-
-          // 找到群主信息
-          const owner = memberList.find(m => m.is_owner);
-          setOwnerInfo(owner);
-        }
-      } catch (error) {
-        console.error('加载群成员失败:', error);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    loadMembers();
-  }, [groupId, visible]);
-
-  // 获取头像URL
+  // 获取头像URL - 统一使用uploads/files目录
   const getAvatarSrc = (avatar) => {
-    if (avatar && avatar !== 'default.png') {
-      return `${process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080'}/uploads/avatars/${avatar}`;
+    if (!avatar || avatar === 'default.png') {
+      return null;
     }
-    return null;
+
+    const baseURL = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
+    return `${baseURL}/uploads/files/${avatar}`;
   };
 
-  if (!visible) return null;
+  useEffect(() => {
+    if (visible && groupId) {
+      loadGroupMembers();
+    } else {
+      setMembers([]);
+    }
+  }, [visible, groupId]);
+
+  useEffect(() => {
+    if (groupMembers.length > 0) {
+      setMembers(groupMembers);
+    }
+  }, [groupMembers]);
+
+  const loadGroupMembers = async () => {
+    setLoading(true);
+    try {
+      const response = await groupAPI.getGroupMembers(groupId);
+      if (response.code === 0) {
+        setMembers(response.data || []);
+      }
+    } catch (error) {
+      console.error('加载群成员失败:', error);
+      message.error('加载群成员失败');
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleMembersUpdate = () => {
+    loadGroupMembers();
+    if (onMembersUpdate) {
+      onMembersUpdate();
+    }
+  };
+
+  if (!visible) {
+    return null;
+  }
 
   return (
     <div style={{
-      width: '260px',
+      position: 'absolute',
+      top: 0,
+      right: 0,
+      width: '320px',
       height: '100%',
-      background: '#fff',
+      backgroundColor: '#fff',
       borderLeft: '1px solid #e8e8e8',
+      boxShadow: '-2px 0 8px rgba(0,0,0,0.1)',
+      zIndex: 10,
       display: 'flex',
       flexDirection: 'column',
-      overflow: 'hidden',
     }}>
-      {/* 标题区域 */}
+      {/* Header */}
       <div style={{
         padding: '16px',
         borderBottom: '1px solid #e8e8e8',
-        background: '#fafafa',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
       }}>
-        <Text strong style={{ fontSize: '14px' }}>
+        <h3 style={{ margin: 0, fontSize: '16px', fontWeight: 500 }}>
           群成员 ({members.length})
-        </Text>
+        </h3>
+        <Button 
+          type="text" 
+          icon={<CloseOutlined />} 
+          onClick={onClose}
+          size="small"
+        />
       </div>
 
-      {/* 成员列表 */}
-      <div style={{
-        flex: 1,
-        overflow: 'auto',
-      }}>
-        {loading ? (
-          <div style={{
-            display: 'flex',
-            justifyContent: 'center',
-            alignItems: 'center',
-            height: '100px',
-          }}>
-            <Spin />
-          </div>
-        ) : (
-          <List
-            dataSource={members}
-            renderItem={(member) => (
-              <List.Item
-                style={{
-                  padding: '12px 16px',
-                  cursor: 'pointer',
-                  borderBottom: '1px solid #f0f0f0',
-                  transition: 'background 0.2s',
-                }}
-                onMouseEnter={(e) => {
-                  e.currentTarget.style.background = '#f5f5f5';
-                }}
-                onMouseLeave={(e) => {
-                  e.currentTarget.style.background = '#fff';
-                }}
-              >
-                <List.Item.Meta
-                  avatar={
-                    <Avatar
-                      size={40}
-                      src={getAvatarSrc(member.avatar)}
-                      icon={<UserOutlined />}
+      {/* Members List */}
+      <div style={{ flex: 1, overflowY: 'auto' }}>
+        <List
+          loading={loading}
+          dataSource={members}
+          renderItem={member => (
+            <List.Item
+              style={{
+                padding: '12px 16px',
+                borderBottom: '1px solid #f0f0f0',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+              }}
+            >
+              <div style={{ display: 'flex', alignItems: 'center', flex: 1 }}>
+                <div style={{ position: 'relative', marginRight: '12px' }}>
+                  <Avatar
+                    src={getAvatarSrc(member.avatar)}
+                    icon={<UserOutlined />}
+                    size={36}
+                  />
+                  {member.is_owner && (
+                    <CrownOutlined 
+                      style={{
+                        position: 'absolute',
+                        bottom: -2,
+                        right: -2,
+                        color: '#faad14',
+                        fontSize: '12px',
+                        background: '#fff',
+                        borderRadius: '50%',
+                        padding: '2px'
+                      }} 
                     />
-                  }
-                  title={
-                    <div style={{
-                      display: 'flex',
-                      alignItems: 'center',
-                      gap: '6px',
-                    }}>
-                      <Text style={{ fontSize: '14px' }}>
-                        {member.nickname || member.username || '未知用户'}
-                      </Text>
-                      {member.is_owner && (
-                        <CrownOutlined style={{ color: '#faad14', fontSize: '14px' }} title="群主" />
-                      )}
-                    </div>
-                  }
-                />
-              </List.Item>
-            )}
-            locale={{
-              emptyText: (
-                <div style={{ textAlign: 'center', padding: '40px', color: '#ccc' }}>
-                  <UserOutlined style={{ fontSize: '32px', marginBottom: '12px' }} />
-                  <div>暂无成员</div>
+                  )}
                 </div>
-              )
-            }}
-          />
-        )}
+                
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div style={{ 
+                    fontSize: '14px', 
+                    fontWeight: 500,
+                    color: '#333',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '4px'
+                  }}>
+                    <span style={{ 
+                      overflow: 'hidden',
+                      textOverflow: 'ellipsis',
+                      whiteSpace: 'nowrap',
+                      maxWidth: '120px'
+                    }}>
+                      {member.username}
+                    </span>
+                    {member.is_owner && (
+                      <Badge 
+                        count="群主" 
+                        style={{ 
+                          backgroundColor: '#faad14',
+                          fontSize: '10px',
+                          height: '16px',
+                          lineHeight: '16px'
+                        }} 
+                      />
+                    )}
+                  </div>
+                  
+                  <div style={{ 
+                    fontSize: '12px', 
+                    color: '#999',
+                    marginTop: '2px'
+                  }}>
+                    {member.is_owner ? '群主' : member.joined_at}
+                  </div>
+                </div>
+              </div>
+
+              {/* 当前用户标识 */}
+              {member.user_id === currentUser?.id && (
+                <Badge 
+                  count="我" 
+                  style={{ 
+                    backgroundColor: '#52c41a',
+                    fontSize: '10px',
+                    height: '16px',
+                    lineHeight: '16px'
+                  }} 
+                />
+              )}
+            </List.Item>
+          )}
+          locale={{
+            emptyText: (
+              <div style={{ 
+                textAlign: 'center', 
+                padding: '40px 20px', 
+                color: '#999' 
+              }}>
+                <UserOutlined style={{ fontSize: '48px', marginBottom: '16px', color: '#d9d9d9' }} />
+                <div style={{ fontSize: '14px' }}>暂无群成员</div>
+              </div>
+            )
+          }}
+        />
+      </div>
+
+      {/* Footer */}
+      <div style={{
+        padding: '16px',
+        borderTop: '1px solid #e8e8e8',
+        textAlign: 'center',
+      }}>
+        <div style={{ fontSize: '12px', color: '#999' }}>
+          群成员信息实时同步
+        </div>
       </div>
     </div>
   );

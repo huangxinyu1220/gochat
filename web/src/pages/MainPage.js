@@ -12,11 +12,25 @@ import GroupAvatar from '../components/GroupAvatar';
 import GroupMembersSidebar from '../components/GroupMembersSidebar';
 import GroupDetailModal from '../components/GroupDetailModal';
 import { getNameInitial } from '../utils/chinesePinyin';
+import { getAvatarSrc, updateAvatarCacheVersion } from '../utils/avatar';
 
 // 企业微信风格布局的IM界面
 const MainPage = () => {
   const { Text } = Typography;
   const { TextArea } = Input;
+
+  // 添加CSS动画定义
+  useEffect(() => {
+    const style = document.createElement('style');
+    style.textContent = `
+      @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+      }
+    `;
+    document.head.appendChild(style);
+    return () => document.head.removeChild(style);
+  }, []);
 
   // 为每个会话维护独立的输入框内容
   const [conversationInputs, setConversationInputs] = useState({});
@@ -142,8 +156,40 @@ const MainPage = () => {
   const [groupDetailModalVisible, setGroupDetailModalVisible] = useState(false);
   const [showAddMemberInitially, setShowAddMemberInitially] = useState(false);
 
+  // 群成员侧边栏显示状态
+  const [groupMembersSidebarVisible, setGroupMembersSidebarVisible] = useState(true);
+
   // 群成员缓存（用于九宫格头像）
   const [groupMembersCache, setGroupMembersCache] = useState({});
+
+  // 响应式状态 - 监听窗口宽度
+  const [windowWidth, setWindowWidth] = useState(window.innerWidth);
+
+  // 监听窗口大小变化
+  useEffect(() => {
+    const handleResize = () => {
+      setWindowWidth(window.innerWidth);
+    };
+
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, []);
+
+  // 计算是否应该显示群成员侧边栏
+  const shouldShowGroupMembersSidebar = rightPanelVisible &&
+                                       selectedItem?.type === 2 &&
+                                       windowWidth >= 1200 &&
+                                       groupMembersSidebarVisible;
+
+  // 群成员侧边栏关闭处理函数
+  const handleGroupMembersSidebarClose = () => {
+    setGroupMembersSidebarVisible(false);
+  };
+
+  // 群成员侧边栏切换处理函数
+  const handleGroupMembersSidebarToggle = () => {
+    setGroupMembersSidebarVisible(!groupMembersSidebarVisible);
+  };
 
   // 图片上传相关状态
   const [uploading, setUploading] = useState(false);
@@ -346,17 +392,17 @@ const MainPage = () => {
     await logout();
   };
 
-  // 获取头像显示URL
-  const getAvatarSrc = (avatar) => {
-    if (avatar && avatar !== 'default.png') {
-      return `${process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080'}/uploads/avatars/${avatar}`;
-    }
-    return null;
-  };
-
   // 处理个人信息编辑成功
   const handleProfileEditSuccess = (updatedUser) => {
     setProfileEditModalVisible(false);
+    // 更新全局头像缓存版本号，强制刷新所有头像
+    updateAvatarCacheVersion();
+    // 强制重新渲染所有头像组件
+    setTimeout(() => {
+      // 这个延时确保DOM更新完成后强制重新渲染
+      const event = new Event('avatarUpdated');
+      window.dispatchEvent(event);
+    }, 100);
   };
 
   // 导航菜单
@@ -406,6 +452,11 @@ const MainPage = () => {
   const handleConversationSelect = async (conversation) => {
     setSelectedItem(conversation);
     setRightPanelVisible(true);
+
+    // 如果选择的是群聊，重新显示群成员侧边栏
+    if (conversation.type === 2) {
+      setGroupMembersSidebarVisible(true);
+    }
 
     // 自动清除未读消息
     if (conversation.unread_count > 0) {
@@ -675,6 +726,7 @@ const MainPage = () => {
     };
     setSelectedItem(newConversation);
     setRightPanelVisible(true);
+    setGroupMembersSidebarVisible(true); // 显示群成员侧边栏
   };
 
   const renderMainContent = () => {
@@ -1060,6 +1112,26 @@ const MainPage = () => {
                   size="small"
                   style={{ color: '#666' }}
                 />
+
+                {/* 群成员列表切换按钮 */}
+                <Button
+                  type={shouldShowGroupMembersSidebar ? "primary" : "text"}
+                  icon={<TeamOutlined />}
+                  onClick={handleGroupMembersSidebarToggle}
+                  size="small"
+                  style={{
+                    color: shouldShowGroupMembersSidebar ? '#fff' : '#666',
+                    backgroundColor: shouldShowGroupMembersSidebar ? '#1890ff' : 'transparent',
+                  }}
+                  title={
+                    windowWidth < 1200
+                      ? "屏幕较小，群成员列表已自动隐藏"
+                      : (groupMembersSidebarVisible ? "隐藏群成员列表" : "显示群成员列表")
+                  }
+                  disabled={windowWidth < 1200}
+                >
+                  {groupMembersCache[selectedItem.target_id]?.length || ''}
+                </Button>
               </>
             )}
             {/* 关闭按钮 */}
@@ -1191,7 +1263,7 @@ const MainPage = () => {
                       <AudioOutlined title="语音" style={{ cursor: 'pointer', opacity: 0.6 }} />
                     </div>
 
-                    {/* 右下角发送文字 - 根据输入状态改变颜色 */}
+                    {/* 右下角发送文字 - 根据输入状态改变颜色，修复点击问题 */}
                     <div
                       style={{
                         position: 'absolute',
@@ -1202,20 +1274,20 @@ const MainPage = () => {
                         fontWeight: '500',
                         cursor: getInputValue(selectedItem.id).trim() ? 'pointer' : 'not-allowed', // 有内容时可点击
                         userSelect: 'none',
+                        zIndex: 10, // 确保在最上层
+                        pointerEvents: getInputValue(selectedItem.id).trim() ? 'auto' : 'none', // 有内容时可点击，无内容时不可点击
                       }}
-                      onClick={() => {
-                        if (getInputValue(selectedItem.id).trim()) {
-                          // 这里触发发送消息的逻辑在ChatInterface中处理
-                          const event = new KeyboardEvent('keydown', {
-                            key: 'Enter',
-                            shiftKey: false,
-                          });
-                          // 查找输入框并触发回车事件
-                          const textarea = document.querySelector('textarea');
-                          if (textarea) {
-                            textarea.dispatchEvent(event);
-                          }
+                      onClick={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
+                        if (getInputValue(selectedItem.id).trim() && chatInterfaceRef.current?.handleSendMessage) {
+                          // 直接调用ChatInterface暴露的发送消息方法
+                          chatInterfaceRef.current.handleSendMessage();
                         }
+                      }}
+                      onMouseDown={(e) => {
+                        e.preventDefault();
+                        e.stopPropagation();
                       }}
                     >
                       发送(S)
@@ -1435,7 +1507,7 @@ const MainPage = () => {
   };
 
   return (
-    <div style={{ height: '100vh', display: 'flex' }}>
+    <div style={{ height: '100vh', display: 'flex', position: 'relative' }}>
       {/* 第一块：垂直导航栏（紧凑版，企业微信风格） */}
       <div style={{
         width: '64px',
@@ -1548,6 +1620,7 @@ const MainPage = () => {
         flex: 1,
         background: '#fff',
         overflow: 'hidden',
+        marginRight: shouldShowGroupMembersSidebar ? '320px' : '0',
       }}>
         {rightPanelVisible ? renderRightPanel() : renderEmptyPanel()}
 
@@ -1625,11 +1698,54 @@ const MainPage = () => {
                           <Button
                             type="primary"
                             size="small"
-                            loading={searchUser.processing}
                             disabled={searchUser.processing}
                             onClick={() => handleAddFriendFromModal(searchUser)}
+                            style={{
+                              minWidth: '80px', // 固定最小宽度，避免宽度变化
+                              width: '80px', // 固定宽度
+                              height: '28px', // 固定高度
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'center',
+                              transition: 'all 0.2s ease', // 缩短过渡时间，更快响应
+                              overflow: 'hidden', // 防止文本溢出
+                              whiteSpace: 'nowrap', // 防止文本换行
+                              position: 'relative' // 为loading图标定位
+                            }}
                           >
-                            {searchUser.processing ? '处理中...' : '添加好友'}
+                            {searchUser.processing ? (
+                              <span style={{
+                                fontSize: '12px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                width: '100%'
+                              }}>
+                                <span
+                                  className="loading-spinner"
+                                  style={{
+                                    width: '12px',
+                                    height: '12px',
+                                    border: '2px solid #ffffff',
+                                    borderTop: '2px solid transparent',
+                                    borderRadius: '50%',
+                                    marginRight: '4px',
+                                    animation: 'spin 1s linear infinite'
+                                  }}
+                                />
+                                处理中
+                              </span>
+                            ) : (
+                              <span style={{
+                                fontSize: '12px',
+                                display: 'flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                width: '100%'
+                              }}>
+                                添加好友
+                              </span>
+                            )}
                           </Button>
                         )
                       ]}
@@ -1702,10 +1818,11 @@ const MainPage = () => {
       </div>
 
       {/* 第四块：群成员侧边栏（仅群聊时显示） */}
-      {rightPanelVisible && selectedItem?.type === 2 && (
+      {shouldShowGroupMembersSidebar && (
         <GroupMembersSidebar
           groupId={selectedItem.target_id}
           visible={true}
+          onClose={handleGroupMembersSidebarClose}
         />
       )}
     </div>

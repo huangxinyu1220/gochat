@@ -116,12 +116,42 @@ const FriendsPage = () => {
                     ) : (
                       <Button
                         type="primary"
-                        icon={<UserAddOutlined />}
                         size="small"
-                        loading={loading}
+                        disabled={loading}
                         onClick={() => handleAddFriend(item.id, item.nickname)}
+                        style={{
+                          minWidth: '80px',
+                          width: '80px',
+                          height: '28px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          position: 'relative'
+                        }}
                       >
-                        添加好友
+                        {loading ? (
+                          <span style={{
+                            fontSize: '12px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: '100%'
+                          }}>
+                            <UserAddOutlined style={{ marginRight: '4px' }} />
+                            处理中
+                          </span>
+                        ) : (
+                          <span style={{
+                            fontSize: '12px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: '100%'
+                          }}>
+                            <UserAddOutlined style={{ marginRight: '4px' }} />
+                            添加好友
+                          </span>
+                        )}
                       </Button>
                     )
                   ]}
