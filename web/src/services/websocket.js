@@ -272,7 +272,7 @@ class WebSocketClient {
       content: content,
     };
 
-    // 根据会话类型设置不同的字��
+    // 根据会话类型设置不同的字段
     if (conversationType === 2) {
       // 群聊
       data.group_id = targetId;
@@ -287,6 +287,32 @@ class WebSocketClient {
     }
 
     return this.send('chat', data);
+  }
+
+  // 撤回消息
+  recallMessage(messageId) {
+    if (!this.connected) {
+      console.warn('[WebSocket] 未连接，无法撤回消息');
+      return false;
+    }
+
+    const message = {
+      type: 'chat',
+      action: 'recall',
+      msg_id: this.generateMessageId(),
+      data: {
+        message_id: messageId,
+      },
+    };
+
+    try {
+      this.ws.send(JSON.stringify(message));
+      console.log('[WebSocket] 发送撤回请求:', message);
+      return message.msg_id;
+    } catch (error) {
+      console.error('[WebSocket] 发送撤回请求失败:', error);
+      return false;
+    }
   }
 
   // 处理接收到的消息
@@ -305,6 +331,9 @@ class WebSocketClient {
         break;
       case 'status':
         this.handleStatusMessage(message);
+        break;
+      case 'friend_request':
+        this.handleFriendRequestMessage(message);
         break;
       case 'ping':
         this.handlePing(message);
@@ -336,6 +365,15 @@ class WebSocketClient {
       this.emit('message', message.data);
     } else if (message.action === 'ack') {
       this.emit('message-ack', message.data);
+    } else if (message.action === 'recall_ack') {
+      // 撤回确认
+      this.emit('recall-ack', message.data);
+    } else if (message.action === 'recall_notify') {
+      // 收到撤回通知
+      this.emit('recall-notify', message.data);
+    } else if (message.action === 'recall_failed') {
+      // 撤回失败
+      this.emit('recall-failed', message.data);
     }
   }
 
@@ -343,6 +381,44 @@ class WebSocketClient {
   handleStatusMessage(message) {
     if (message.action === 'online_status') {
       this.emit('online-status', message.data);
+    }
+  }
+
+  // 处理好友申请消息
+  handleFriendRequestMessage(message) {
+    console.log('[WebSocket] 好友申请消息:', message);
+    // 根据action触发不同事件
+    switch (message.action) {
+      case 'new_request':
+        // 收到新的好友申请
+        this.emit('friend-request', {
+          type: 'new_request',
+          data: message.data
+        });
+        break;
+      case 'request_accepted':
+        // 申请被接受
+        this.emit('friend-request', {
+          type: 'request_accepted',
+          data: message.data
+        });
+        break;
+      case 'request_rejected':
+        // 申请被拒绝
+        this.emit('friend-request', {
+          type: 'request_rejected',
+          data: message.data
+        });
+        break;
+      case 'pending_count':
+        // 待处理申请数量更新
+        this.emit('friend-request', {
+          type: 'pending_count',
+          data: message.data
+        });
+        break;
+      default:
+        console.warn('[WebSocket] 未知的好友申请action:', message.action);
     }
   }
 

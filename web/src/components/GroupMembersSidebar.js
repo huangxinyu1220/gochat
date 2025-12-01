@@ -2,29 +2,17 @@ import React, { useState, useEffect } from 'react';
 import { Avatar, List, Button, message, Badge } from 'antd';
 import { UserOutlined, CrownOutlined, CloseOutlined } from '@ant-design/icons';
 import { groupAPI } from '../services/api';
-import { useAuth } from '../context/AuthContext';
+import { getAvatarSrc } from '../utils/avatar';
 
-const GroupMembersSidebar = ({ 
-  visible, 
-  groupId, 
-  onClose, 
-  groupMembers = [], 
-  onMembersUpdate,
-  currentUser 
+const GroupMembersSidebar = ({
+  visible,
+  groupId,
+  onClose,
+  groupMembers = [],
+  currentUser
 }) => {
   const [loading, setLoading] = useState(false);
   const [members, setMembers] = useState([]);
-  const { user } = useAuth();
-
-  // 获取头像URL - 统一使用uploads/files目录
-  const getAvatarSrc = (avatar) => {
-    if (!avatar || avatar === 'default.png') {
-      return null;
-    }
-
-    const baseURL = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
-    return `${baseURL}/uploads/files/${avatar}`;
-  };
 
   useEffect(() => {
     if (visible && groupId) {
@@ -32,6 +20,7 @@ const GroupMembersSidebar = ({
     } else {
       setMembers([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, groupId]);
 
   useEffect(() => {
@@ -52,13 +41,6 @@ const GroupMembersSidebar = ({
       message.error('加载群成员失败');
     } finally {
       setLoading(false);
-    }
-  };
-
-  const handleMembersUpdate = () => {
-    loadGroupMembers();
-    if (onMembersUpdate) {
-      onMembersUpdate();
     }
   };
 

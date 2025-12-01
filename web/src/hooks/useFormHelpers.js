@@ -1,4 +1,4 @@
-import { useCallback } from 'react';
+import { useCallback, useRef } from 'react';
 import { INPUT_STYLES } from '../constants/styles';
 
 // 自定义Hook - 处理输入框焦点状态
@@ -35,11 +35,11 @@ export const useButtonHover = () => {
 
 // 自定义Hook - 防抖
 export const useDebounce = (callback, delay) => {
-  let timeoutRef = null;
+  const timeoutRef = useRef(null);
 
   const debouncedCallback = useCallback((...args) => {
-    clearTimeout(timeoutRef);
-    timeoutRef = setTimeout(() => callback(...args), delay);
+    clearTimeout(timeoutRef.current);
+    timeoutRef.current = setTimeout(() => callback(...args), delay);
   }, [callback, delay]);
 
   return debouncedCallback;

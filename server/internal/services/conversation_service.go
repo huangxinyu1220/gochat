@@ -6,6 +6,7 @@ import (
 	"gorm.io/gorm"
 
 	"gochat/internal/database"
+	"gochat/internal/logger"
 	"gochat/internal/models"
 )
 
@@ -58,12 +59,15 @@ func (s *ConversationService) GetConversations(userID int64) ([]ConversationInfo
 				WHEN c.type = 2 THEN 'default_group.png'
 				ELSE 'default.png'
 			END as target_avatar,
-			COALESCE(m.content, '暂无消息') as last_msg_content,
+			CASE
+				WHEN m.is_recalled = 1 THEN '[消息已撤回]'
+				ELSE COALESCE(m.content, '暂无消息')
+			END as last_msg_content,
 			COALESCE(m.msg_type, 1) as last_msg_type,
 			COALESCE(DATE_FORMAT(m.created_at, '%Y-%m-%d %H:%i:%s'), '') as last_msg_time
 		FROM conversations c
 		LEFT JOIN users u ON c.type = 1 AND c.target_id = u.id
-		LEFT JOIN ` + "`groups`" + ` g ON c.type = 2 AND c.target_id = g.id
+		LEFT JOIN `+"`groups`"+` g ON c.type = 2 AND c.target_id = g.id
 		LEFT JOIN group_members gm ON c.type = 2 AND c.target_id = gm.group_id AND gm.user_id = c.user_id
 		LEFT JOIN messages m ON c.last_msg_id = m.id
 		WHERE c.user_id = ?
@@ -107,7 +111,7 @@ func (s *ConversationService) ClearUnreadCount(userID, conversationID int64) err
 		Update("unread_count", 0).Error
 }
 
-// UpdateLastMessage 更新会话的最后一条消息
+// UpdateLastMessage 更新会话的最后一条消息（使用 upsert 避免竞态条件）
 func (s *ConversationService) UpdateLastMessage(userID, targetID, messageID int64, content string) error {
 	// 判断会话类型（单聊还是群聊）
 	conversationType := models.ConversationTypePrivate // 默认单聊
@@ -118,33 +122,26 @@ func (s *ConversationService) UpdateLastMessage(userID, targetID, messageID int6
 		conversationType = models.ConversationTypeGroup
 	}
 
-	// 查找或创建会话
-	var conversation models.Conversation
-	err := s.db.Where("user_id = ? AND type = ? AND target_id = ?", userID, conversationType, targetID).
-		First(&conversation).Error
+	logger.GetLogger().Debugf("UpdateLastMessage: userID=%d, targetID=%d, messageID=%d, type=%d", userID, targetID, messageID, conversationType)
 
-	if err == gorm.ErrRecordNotFound {
-		// 创建新会话
-		conversation = models.Conversation{
-			UserID:      userID,
-			Type:        conversationType,
-			TargetID:    targetID,
-			LastMsgID:   &messageID,
-			UnreadCount: 0, // 新会话未读计数为0
-			UpdatedAt:   time.Now(),
-		}
-		return s.db.Create(&conversation).Error
-	} else if err != nil {
-		return err
+	now := time.Now()
+
+	// 使用原生 SQL 执行 upsert，避免竞态条件导致重复记录
+	result := s.db.Exec(`
+		INSERT INTO conversations (user_id, type, target_id, last_msg_id, unread_count, updated_at)
+		VALUES (?, ?, ?, ?, 0, ?)
+		ON DUPLICATE KEY UPDATE
+			last_msg_id = VALUES(last_msg_id),
+			updated_at = VALUES(updated_at)
+	`, userID, conversationType, targetID, messageID, now)
+
+	if result.Error != nil {
+		logger.GetLogger().Errorf("更新会话失败: userID=%d, targetID=%d, msgID=%d, err=%v", userID, targetID, messageID, result.Error)
+		return result.Error
 	}
 
-	// 更新现有会话
-	updates := map[string]interface{}{
-		"last_msg_id": messageID,
-		"updated_at":  time.Now(),
-	}
-
-	return s.db.Model(&conversation).Updates(updates).Error
+	logger.GetLogger().Debugf("更新会话成功: userID=%d, targetID=%d, msgID=%d, affected=%d", userID, targetID, messageID, result.RowsAffected)
+	return nil
 }
 
 // IncrementUnreadCount 增加未读计数 (用于消息接收者)

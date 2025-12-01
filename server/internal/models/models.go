@@ -20,6 +20,20 @@ const (
 	ConversationTypeGroup   = 2 // 群聊
 )
 
+// 好友申请状态常量
+const (
+	FriendRequestStatusPending  = 0 // 待处理
+	FriendRequestStatusAccepted = 1 // 已同意
+	FriendRequestStatusRejected = 2 // 已拒绝
+	FriendRequestStatusExpired  = 3 // 已过期
+)
+
+// 好友申请过期天数
+const FriendRequestExpireDays = 7
+
+// 消息撤回时间限制（2分钟）
+const MessageRecallTimeout = 2 * time.Minute
+
 // User 用户模型
 type User struct {
 	ID        int64          `json:"id" gorm:"primaryKey;autoIncrement"`
@@ -88,6 +102,10 @@ type Message struct {
 	Content    string `json:"content" gorm:"type:text;not null"`
 	MsgType    int    `json:"msg_type" gorm:"default:1"`        // 1-文本
 
+	// 撤回相关
+	IsRecalled bool       `json:"is_recalled" gorm:"default:false"` // 是否已撤回
+	RecalledAt *time.Time `json:"recalled_at" gorm:"default:null"`  // 撤回时间
+
 	CreatedAt time.Time `json:"created_at"`
 
 	// 关联
@@ -99,9 +117,9 @@ type Message struct {
 // Conversation 会话模型
 type Conversation struct {
 	ID          int64  `json:"id" gorm:"primaryKey;autoIncrement"`
-	UserID      int64  `json:"user_id" gorm:"not null"`
-	Type        int    `json:"type" gorm:"not null"`        // 1-单聊 2-群聊
-	TargetID    int64  `json:"target_id" gorm:"not null"`   // 好友ID或群组ID
+	UserID      int64  `json:"user_id" gorm:"not null;uniqueIndex:idx_user_type_target"`
+	Type        int    `json:"type" gorm:"not null;uniqueIndex:idx_user_type_target"`        // 1-单聊 2-群聊
+	TargetID    int64  `json:"target_id" gorm:"not null;uniqueIndex:idx_user_type_target"`   // 好友ID或群组ID
 	LastMsgID   *int64 `json:"last_msg_id" gorm:"default:null"` // 最后一条消息ID
 	UnreadCount int    `json:"unread_count" gorm:"default:0"`
 
@@ -151,3 +169,29 @@ func (Message) TableName() string        { return "messages" }
 func (Conversation) TableName() string   { return "conversations" }
 func (FileStorage) TableName() string    { return "file_storage" }
 func (FileReference) TableName() string  { return "file_references" }
+func (FriendRequest) TableName() string  { return "friend_requests" }
+
+// FriendRequest 好友申请模型
+type FriendRequest struct {
+	ID         int64          `json:"id" gorm:"primaryKey;autoIncrement"`
+	FromUserID int64          `json:"from_user_id" gorm:"index:idx_from_user;not null"`
+	ToUserID   int64          `json:"to_user_id" gorm:"index:idx_to_user;not null"`
+	Message    string         `json:"message" gorm:"size:200;default:''"` // 验证消息
+	Status     int            `json:"status" gorm:"default:0;index:idx_status"`
+
+	CreatedAt time.Time      `json:"created_at"`
+	UpdatedAt time.Time      `json:"updated_at"`
+	DeletedAt gorm.DeletedAt `json:"-" gorm:"index"`
+
+	// 关联
+	FromUser User `json:"-" gorm:"foreignKey:FromUserID"`
+	ToUser   User `json:"-" gorm:"foreignKey:ToUserID"`
+}
+
+// IsExpired 检查申请是否已过期
+func (f *FriendRequest) IsExpired() bool {
+	if f.Status != FriendRequestStatusPending {
+		return false
+	}
+	return time.Since(f.CreatedAt) > time.Duration(FriendRequestExpireDays)*24*time.Hour
+}

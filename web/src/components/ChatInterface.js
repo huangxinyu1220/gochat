@@ -1,7 +1,12 @@
 import React, { useState, useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react';
-import { Spin, App, Image } from 'antd';
+import { Spin, App, Image, Dropdown } from 'antd';
 import { messageAPI } from '../services/api';
 import { useWebSocket } from '../context/WebSocketContext';
+import { getBaseUrl } from '../config';
+import VoiceMessage from './VoiceMessage';
+
+// 消息撤回时间限制（2分钟，单位毫秒）
+const MESSAGE_RECALL_TIMEOUT = 2 * 60 * 1000;
 
 const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setInputValue, onSendMessage, onClearUnread }, ref) => {
   const { message } = App.useApp(); // 使用 App.useApp() 获取 message 实例
@@ -18,7 +23,7 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
   const abortControllerRef = useRef(null); // 用于取消请求
   const currentConversationIdRef = useRef(null); // 追踪当前会话ID
   const inputValueRef = useRef(inputValue); // 追踪输入框内容，避免事件监听器频繁重新注册
-  const { wsClient, isConnected } = useWebSocket();
+  const { wsClient } = useWebSocket();
 
   // 更新 inputValueRef
   useEffect(() => {
@@ -134,6 +139,8 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
           msg_type: msg.msg_type || 1, // 确保有msg_type字段，默认为1（文本）
           created_at: new Date(msg.created_at).getTime(),
           isSelf: msg.from_user_id === currentUser?.id,
+          is_recalled: msg.is_recalled || false, // 撤回状态
+          recalled_at: msg.recalled_at || 0, // 撤回时间
         }));
 
         // 按时间正序排列（API返回的是倒序）
@@ -239,7 +246,8 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
         setLoadingMore(false);
       }
     }
-  }, [conversation, currentUser]); // 移除loading状态依赖，避免频繁重新创建函数
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [conversation, currentUser]); // 有意忽略loading状态依赖，避免频繁重新创建函数
 
   // 初始化消息处理和历史加载
   useEffect(() => {
@@ -330,6 +338,63 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
     ));
   }, []);
 
+  // 处理消息撤回通知
+  const handleRecallNotify = useCallback((data) => {
+    const { message_id, from_user_id, from_user_nickname, to_user_id, group_id } = data;
+
+    // 检查是否属于当前会话
+    if (!conversation) {
+      return;
+    }
+
+    let isCurrentConversation = false;
+    if (conversation.type === 1) {
+      // 单聊：检查消息是否涉及当前会话的双方
+      // 情况1：对方发送的消息被撤回 (from_user_id是对方, to_user_id是自己)
+      // 情况2：自己发送的消息被撤回 (from_user_id是自己, to_user_id是对方)
+      const isFromTarget = from_user_id === conversation.target_id;
+      const isToTarget = to_user_id === conversation.target_id;
+      const isFromSelf = from_user_id === currentUser?.id;
+      const isToSelf = to_user_id === currentUser?.id;
+
+      isCurrentConversation =
+        (isFromTarget && isToSelf) ||  // 对方发给自己
+        (isFromSelf && isToTarget);    // 自己发给对方
+    } else if (conversation.type === 2) {
+      // 群聊：检查是否是目标群组
+      isCurrentConversation = group_id === conversation.target_id;
+    }
+
+    if (!isCurrentConversation) return;
+
+    // 更新本地消息列表中对应消息的撤回状态
+    setMessages(prev => prev.map(msg =>
+      msg.id === message_id
+        ? { ...msg, is_recalled: true, recalled_at: Date.now(), from_user_nickname }
+        : msg
+    ));
+  }, [conversation, currentUser]);
+
+  // 处理撤回确认
+  const handleRecallAck = useCallback((data) => {
+    // 撤回成功，本地已通过 recall-notify 更新
+  }, []);
+
+  // 处理撤回失败
+  const handleRecallFailed = useCallback((data) => {
+    message.error(data.error || '撤回失败');
+  }, [message]);
+
+  // 撤回消息
+  const handleRecallMessage = useCallback((messageId) => {
+    if (!wsClient) {
+      message.error('连接已断开，无法撤回消息');
+      return;
+    }
+
+    wsClient.recallMessage(messageId);
+  }, [wsClient, message]);
+
   // 设置消息处理器
   const setupMessageHandlers = () => {
     if (!wsClient) return;
@@ -337,10 +402,16 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
     // 移除旧的处理器（避免重复）
     wsClient.off('message', handleNewMessage);
     wsClient.off('message-ack', handleMessageAck);
+    wsClient.off('recall-notify', handleRecallNotify);
+    wsClient.off('recall-ack', handleRecallAck);
+    wsClient.off('recall-failed', handleRecallFailed);
 
     // 添加新的处理器
     wsClient.on('message', handleNewMessage);
     wsClient.on('message-ack', handleMessageAck);
+    wsClient.on('recall-notify', handleRecallNotify);
+    wsClient.on('recall-ack', handleRecallAck);
+    wsClient.on('recall-failed', handleRecallFailed);
   };
 
   // 独立的WebSocket处理器设置
@@ -354,9 +425,12 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
       if (wsClient) {
         wsClient.off('message', handleNewMessage);
         wsClient.off('message-ack', handleMessageAck);
+        wsClient.off('recall-notify', handleRecallNotify);
+        wsClient.off('recall-ack', handleRecallAck);
+        wsClient.off('recall-failed', handleRecallFailed);
       }
     };
-  }, [wsClient, handleNewMessage, handleMessageAck]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [wsClient, handleNewMessage, handleMessageAck, handleRecallNotify, handleRecallAck, handleRecallFailed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // 加载更多历史消息
   const loadMoreHistory = useCallback(() => {
@@ -364,14 +438,15 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
       const nextPage = currentPage + 1;
       loadMessageHistory(nextPage, false);
     }
-  }, [hasMoreHistory, currentPage, loadingMore]); // 移除loadMessageHistory依赖，避免循环依赖
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hasMoreHistory, currentPage, loadingMore]); // 有意忽略loadMessageHistory依赖，避免循环依赖
 
   // 滚动监听：检测是否滚动到顶部
   useEffect(() => {
     let lastScrollTop = 0;
 
     const handleScroll = (e) => {
-      const { scrollTop, scrollHeight, clientHeight } = e.target;
+      const { scrollTop } = e.target;
 
       // 检测滚动方向
       const isScrollingUp = scrollTop < lastScrollTop;
@@ -452,7 +527,7 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
     if (onSendMessage && !messageContent) {
       onSendMessage(content);
     }
-  }, [inputValue, wsClient, isConnected, conversation, currentUser, onClearUnread, onSendMessage, setInputValue, scrollToBottom]);
+  }, [inputValue, wsClient, conversation, currentUser, onClearUnread, onSendMessage, setInputValue, scrollToBottom]);
 
   // 暴露方法给父组件
   useImperativeHandle(ref, () => ({
@@ -479,34 +554,6 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
       document.removeEventListener('keydown', handleGlobalKeyDown);
     };
   }, [handleSendMessage]); // 只依赖 handleSendMessage，不再依赖 inputValue
-
-  // 格式化时间 - 修复时区问题
-  const formatTime = (timestamp) => {
-    // 确保时间戳是正确的格式，如果是字符串则解析，如果是数字则直接使用
-    let date;
-    if (typeof timestamp === 'string') {
-      // 后端返回的ISO字符串，直接解析
-      date = new Date(timestamp);
-    } else if (typeof timestamp === 'number') {
-      // 数字时间戳，检查是否是毫秒级别
-      date = new Date(timestamp > 1000000000000 ? timestamp : timestamp * 1000);
-    } else {
-      date = new Date(timestamp);
-    }
-
-    const now = new Date();
-    const diff = now - date;
-
-    if (diff < 60000) { // 1分钟内
-      return '刚刚';
-    } else if (diff < 3600000) { // 1小时内
-      return `${Math.floor(diff / 60000)}分钟前`;
-    } else if (diff < 86400000) { // 24小时内
-      return `${Math.floor(diff / 3600000)}小时前`;
-    } else {
-      return date.toLocaleDateString('zh-CN');
-    }
-  };
 
   // 格式化hover时间 - 企业微信风格：月/日 时:分
   const formatHoverTime = (timestamp) => {
@@ -567,13 +614,57 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
     }
   };
 
+  // 检查消息是否可以撤回（自己发送的消息且在2分钟内）
+  const canRecallMessage = (msg) => {
+    if (!msg.isSelf) return false; // 只能撤回自己的消息
+    if (msg.is_recalled) return false; // 已撤回的消息不能再撤回
+    if (msg.sending) return false; // 发送中的消息不能撤回
+
+    // 检查消息 ID 是否为有效的数字（不是临时 ID）
+    const msgId = msg.id;
+    if (typeof msgId === 'string' && msgId.startsWith('temp_')) {
+      return false; // 临时 ID 的消息还未确认，不能撤回
+    }
+
+    const messageTime = typeof msg.created_at === 'number'
+      ? (msg.created_at > 1000000000000 ? msg.created_at : msg.created_at * 1000)
+      : new Date(msg.created_at).getTime();
+
+    const now = Date.now();
+    return (now - messageTime) < MESSAGE_RECALL_TIMEOUT;
+  };
+
+  // 获取消息的右键菜单配置
+  const getMessageContextMenu = (msg) => {
+    const items = [];
+
+    const canRecall = canRecallMessage(msg);
+
+    // 撤回选项（仅自己发送的消息且在2分钟内）
+    if (canRecall) {
+      items.push({
+        key: 'recall',
+        label: '撤回',
+      });
+    }
+
+    // 使用 menu.onClick 统一处理点击事件
+    const onClick = ({ key }) => {
+      if (key === 'recall') {
+        handleRecallMessage(msg.id);
+      }
+    };
+
+    return { items, onClick };
+  };
+
   // 渲染消息内容
   const renderMessageContent = (msg) => {
-    const { content, msg_type } = msg;
+    const { content, msg_type, isSelf } = msg;
 
     // 图片消息
     if (msg_type === 2) {
-      const imageUrl = `${process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080'}${content}`;
+      const imageUrl = `${getBaseUrl()}${content}`;
       return (
         <Image
           src={imageUrl}
@@ -587,6 +678,27 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
           preview={{
             mask: <div style={{ fontSize: '14px' }}>点击查看大图</div>,
           }}
+        />
+      );
+    }
+
+    // 语音消息
+    if (msg_type === 3) {
+      // 解析语音内容（格式：url|duration）
+      let voiceUrl = content;
+      let duration = 0;
+
+      if (content.includes('|')) {
+        const [url, dur] = content.split('|');
+        voiceUrl = url;
+        duration = parseFloat(dur) || 0;
+      }
+
+      return (
+        <VoiceMessage
+          src={voiceUrl}
+          duration={duration}
+          isSelf={isSelf}
         />
       );
     }
@@ -725,6 +837,193 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
               const previousMsg = index > 0 ? messages[index - 1] : null;
               const showTimeDivider = needsTimeDivider(msg, previousMsg);
               const isCompact = needsCompactSpacing(msg, previousMsg, conversation.type);
+              const contextMenuConfig = getMessageContextMenu(msg);
+
+              // 已撤回消息的渲染
+              if (msg.is_recalled) {
+                return (
+                  <div key={`${msg.id}_${index}`}>
+                    {/* 时间分隔线 */}
+                    {showTimeDivider && (
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'center',
+                        margin: '16px 0',
+                      }}>
+                        <div style={{
+                          color: '#999',
+                          fontSize: '12px',
+                        }}>
+                          {formatTimeDivider(msg.created_at)}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* 撤回消息提示 */}
+                    <div style={{
+                      display: 'flex',
+                      justifyContent: 'center',
+                      margin: '8px 0',
+                    }}>
+                      <div style={{
+                        color: '#999',
+                        fontSize: '12px',
+                      }}>
+                        {msg.isSelf
+                          ? '你撤回了一条消息'
+                          : `${msg.from_user?.nickname || msg.from_user_nickname || '对方'}撤回了一条消息`}
+                      </div>
+                    </div>
+                  </div>
+                );
+              }
+
+              // 消息气泡内容
+              const messageBubble = (
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    alignItems: msg.isSelf ? 'flex-end' : 'flex-start',
+                    marginBottom: isCompact ? '2px' : '4px',
+                  }}
+                  onMouseEnter={() => setHoveredMessageId(msg.id)}
+                  onMouseLeave={() => setHoveredMessageId(null)}
+                >
+                  {/* 群聊消息显示发送者昵称和hover时间（仅对方消息） */}
+                  {conversation.type === 2 && !msg.isSelf && msg.from_user && (
+                    <div style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '8px',
+                      marginTop: '2px',
+                      marginBottom: '2px',
+                      marginLeft: '2px',
+                      height: '16px',
+                      lineHeight: '16px',
+                    }}>
+                      <span style={{
+                        fontSize: '12px',
+                        color: '#888',
+                      }}>
+                        {msg.from_user.nickname || '未知用户'}
+                      </span>
+                      {hoveredMessageId === msg.id && (
+                        <span style={{
+                          fontSize: '11px',
+                          color: '#999',
+                        }}>
+                          {formatHoverTime(msg.created_at)}
+                        </span>
+                      )}
+                    </div>
+                  )}
+
+                  {/* 单聊对方消息hover时间显示 - 固定高度避免跳动 */}
+                  {conversation.type === 1 && !msg.isSelf && (
+                    <div style={{
+                      fontSize: '11px',
+                      color: hoveredMessageId === msg.id ? '#999' : 'transparent',
+                      marginTop: '2px',
+                      marginBottom: '2px',
+                      marginLeft: '2px',
+                      height: '16px',
+                      lineHeight: '16px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'flex-start',
+                    }}>
+                      {formatHoverTime(msg.created_at)}
+                    </div>
+                  )}
+
+                  {/* 自己的消息hover时间显示 - 固定高度避免跳动 */}
+                  {msg.isSelf && (
+                    <div style={{
+                      fontSize: '11px',
+                      color: hoveredMessageId === msg.id ? '#999' : 'transparent',
+                      marginTop: '2px',
+                      marginBottom: '2px',
+                      marginRight: '2px',
+                      height: '16px',
+                      lineHeight: '16px',
+                      display: 'flex',
+                      alignItems: 'center',
+                      justifyContent: 'flex-end',
+                    }}>
+                      {formatHoverTime(msg.created_at)}
+                    </div>
+                  )}
+
+                  <div
+                    style={{
+                      maxWidth: '70%',
+                      background: msg.msg_type === 3 ? 'transparent' : (msg.isSelf ? '#95ec69' : '#fff'),
+                      color: '#333',
+                      padding: msg.msg_type === 3 ? '0' : '8px 12px',
+                      borderRadius: '6px',
+                      position: 'relative',
+                      boxShadow: msg.msg_type === 3 ? 'none' : '0 1px 3px rgba(0, 0, 0, 0.1)',
+                      border: msg.msg_type === 3 ? 'none' : (msg.isSelf ? 'none' : '1px solid #e5e7eb'),
+                      wordBreak: 'break-word',
+                    }}
+                  >
+                    {msg.sending && (
+                      <div style={{
+                        fontSize: '12px',
+                        color: '#999',
+                        marginBottom: '4px',
+                      }}>
+                        发送中...
+                      </div>
+                    )}
+
+                    <div style={{ lineHeight: '1.5', fontSize: '15px' }}>
+                      {renderMessageContent(msg)}
+                    </div>
+
+                    {/* 优化的气泡尾巴 - 双方都有三角尖，语音消息不显示 */}
+                    {msg.msg_type !== 3 && (msg.isSelf ? (
+                      <div style={{
+                        position: 'absolute',
+                        bottom: '50%',
+                        transform: 'translateY(50%)',
+                        right: '-5px',
+                        width: 0,
+                        height: 0,
+                        borderLeft: '6px solid #95ec69',
+                        borderTop: '4px solid transparent',
+                        borderBottom: '4px solid transparent',
+                      }} />
+                    ) : (
+                      <>
+                        <div style={{
+                          position: 'absolute',
+                          bottom: '50%',
+                          transform: 'translateY(50%)',
+                          left: '-7px',
+                          width: 0,
+                          height: 0,
+                          borderRight: '7px solid #e5e7eb',
+                          borderTop: '4px solid transparent',
+                          borderBottom: '4px solid transparent',
+                        }} />
+                        <div style={{
+                          position: 'absolute',
+                          bottom: '50%',
+                          transform: 'translateY(50%)',
+                          left: '-6px',
+                          width: 0,
+                          height: 0,
+                          borderRight: '6px solid #fff',
+                          borderTop: '4px solid transparent',
+                          borderBottom: '4px solid transparent',
+                        }} />
+                      </>
+                    ))}
+                  </div>
+                </div>
+              );
 
               return (
                 <div key={`${msg.id}_${index}`}>
@@ -744,154 +1043,17 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
                     </div>
                   )}
 
-                  {/* 消息气泡 */}
-                  <div
-                    style={{
-                      display: 'flex',
-                      flexDirection: 'column',
-                      alignItems: msg.isSelf ? 'flex-end' : 'flex-start',
-                      marginBottom: isCompact ? '2px' : '4px', // 紧凑模式2px，正常模式也改为4px，更紧凑
-                    }}
-                    onMouseEnter={() => setHoveredMessageId(msg.id)}
-                    onMouseLeave={() => setHoveredMessageId(null)}
-                  >
-                    {/* 群聊消息显示发送者昵称和hover时间（仅对方消息） */}
-                    {conversation.type === 2 && !msg.isSelf && msg.from_user && (
-                      <div style={{
-                        display: 'flex',
-                        alignItems: 'center',
-                        gap: '8px',
-                        marginTop: '2px',
-                        marginBottom: '2px',
-                        marginLeft: '2px',
-                        height: '16px',
-                        lineHeight: '16px',
-                      }}>
-                        <span style={{
-                          fontSize: '12px',
-                          color: '#888',
-                        }}>
-                          {msg.from_user.nickname || '未知用户'}
-                        </span>
-                        {hoveredMessageId === msg.id && (
-                          <span style={{
-                            fontSize: '11px',
-                            color: '#999',
-                          }}>
-                            {formatHoverTime(msg.created_at)}
-                          </span>
-                        )}
-                      </div>
-                    )}
-
-                    {/* 单聊对方消息hover时间显示 - 固定高度避免跳动 */}
-                    {conversation.type === 1 && !msg.isSelf && (
-                      <div style={{
-                        fontSize: '11px',
-                        color: hoveredMessageId === msg.id ? '#999' : 'transparent',
-                        marginTop: '2px',
-                        marginBottom: '2px',
-                        marginLeft: '2px',
-                        height: '16px',
-                        lineHeight: '16px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'flex-start',
-                      }}>
-                        {formatHoverTime(msg.created_at)}
-                      </div>
-                    )}
-
-                    {/* 自己的消息hover时间显示 - 固定高度避免跳动 */}
-                    {msg.isSelf && (
-                      <div style={{
-                        fontSize: '11px',
-                        color: hoveredMessageId === msg.id ? '#999' : 'transparent',
-                        marginTop: '2px',
-                        marginBottom: '2px',
-                        marginRight: '2px',
-                        height: '16px',
-                        lineHeight: '16px',
-                        display: 'flex',
-                        alignItems: 'center',
-                        justifyContent: 'flex-end',
-                      }}>
-                        {formatHoverTime(msg.created_at)}
-                      </div>
-                    )}
-
-                    <div
-                      style={{
-                        maxWidth: '70%',
-                        background: msg.isSelf ? '#95ec69' : '#fff',
-                        color: '#333',
-                        padding: '8px 12px',
-                        borderRadius: '6px',
-                        position: 'relative',
-                        boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)',
-                        border: msg.isSelf ? 'none' : '1px solid #e5e7eb',
-                        wordBreak: 'break-word',
-                      }}
+                  {/* 消息气泡 - 使用 Dropdown 包装实现右键菜单 */}
+                  {contextMenuConfig.items.length > 0 ? (
+                    <Dropdown
+                      menu={contextMenuConfig}
+                      trigger={['contextMenu']}
                     >
-                      {msg.sending && (
-                        <div style={{
-                          fontSize: '12px',
-                          color: '#999',
-                          marginBottom: '4px',
-                        }}>
-                          发送中...
-                        </div>
-                      )}
-
-                      <div style={{ lineHeight: '1.5', fontSize: '15px' }}>
-                        {renderMessageContent(msg)}
-                      </div>
-
-                      {/* 优化的气泡尾巴 - 双方都有三角尖 */}
-                      {msg.isSelf ? (
-                        // 自己的消息：右侧绿色三角尖 - 调整位置到气泡中央
-                        <div style={{
-                          position: 'absolute',
-                          bottom: '50%',
-                          transform: 'translateY(50%)', // 垂直居中
-                          right: '-5px',
-                          width: 0,
-                          height: 0,
-                          borderLeft: '6px solid #95ec69',
-                          borderTop: '4px solid transparent',
-                          borderBottom: '4px solid transparent',
-                        }} />
-                      ) : (
-                        // 好友的消息：左侧带边框的白色三角尖
-                        <>
-                          {/* 外层边框三角 */}
-                          <div style={{
-                            position: 'absolute',
-                            bottom: '50%',
-                            transform: 'translateY(50%)', // 垂直居中
-                            left: '-7px',
-                            width: 0,
-                            height: 0,
-                            borderRight: '7px solid #e5e7eb',
-                            borderTop: '4px solid transparent',
-                            borderBottom: '4px solid transparent',
-                          }} />
-                          {/* 内层白色三角 */}
-                          <div style={{
-                            position: 'absolute',
-                            bottom: '50%',
-                            transform: 'translateY(50%)', // 垂直居中
-                            left: '-6px',
-                            width: 0,
-                            height: 0,
-                            borderRight: '6px solid #fff',
-                            borderTop: '4px solid transparent',
-                            borderBottom: '4px solid transparent',
-                          }} />
-                        </>
-                      )}
-                    </div>
-                  </div>
+                      <div>{messageBubble}</div>
+                    </Dropdown>
+                  ) : (
+                    messageBubble
+                  )}
                 </div>
               );
             })}

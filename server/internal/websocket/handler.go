@@ -132,7 +132,15 @@ func handleMessage(client *ClientInfo, message *WSMessage) {
 	case "pong":
 		handlePong(client)
 	case "chat":
-		handleChatMessage(client, message)
+		// 根据 action 区分是发送消息还是撤回消息
+		switch message.Action {
+		case "send":
+			handleChatMessage(client, message)
+		case "recall":
+			handleRecallMessage(client, message)
+		default:
+			logger.GetLogger().Infof("未知的chat action: %s", message.Action)
+		}
 	default:
 		logger.GetLogger().Infof("未知消息类型: %s", message.Type)
 	}
@@ -278,19 +286,27 @@ func saveMessageAndUpdateConversation(client *ClientInfo, msg *models.Message, r
 	conversationService := services.NewConversationService()
 	if msg.ToUserID != nil {
 		// 单聊：更新双方的会话
-		conversationService.UpdateLastMessage(client.UserID, *msg.ToUserID, messageID, msg.Content)
-		conversationService.UpdateLastMessage(*msg.ToUserID, client.UserID, messageID, msg.Content)
+		if err := conversationService.UpdateLastMessage(client.UserID, *msg.ToUserID, messageID, msg.Content); err != nil {
+			logger.GetLogger().Errorf("更新发送者会话失败: userID=%d, targetID=%d, msgID=%d, err=%v", client.UserID, *msg.ToUserID, messageID, err)
+		}
+		if err := conversationService.UpdateLastMessage(*msg.ToUserID, client.UserID, messageID, msg.Content); err != nil {
+			logger.GetLogger().Errorf("更新接收者会话失败: userID=%d, targetID=%d, msgID=%d, err=%v", *msg.ToUserID, client.UserID, messageID, err)
+		}
 		// 为接收者增加未读计数
 		conversationService.IncrementUnreadCount(*msg.ToUserID, client.UserID, models.ConversationTypePrivate)
 	} else if msg.GroupID != nil {
 		// 群聊：更新所有群成员的会话
 		for _, recipientID := range recipients {
-			conversationService.UpdateLastMessage(recipientID, *msg.GroupID, messageID, msg.Content)
+			if err := conversationService.UpdateLastMessage(recipientID, *msg.GroupID, messageID, msg.Content); err != nil {
+				logger.GetLogger().Errorf("更新群成员会话失败: userID=%d, groupID=%d, msgID=%d, err=%v", recipientID, *msg.GroupID, messageID, err)
+			}
 			// 为接收者增加未读计数
 			conversationService.IncrementUnreadCount(recipientID, *msg.GroupID, models.ConversationTypeGroup)
 		}
 		// 也更新发送者的会话
-		conversationService.UpdateLastMessage(client.UserID, *msg.GroupID, messageID, msg.Content)
+		if err := conversationService.UpdateLastMessage(client.UserID, *msg.GroupID, messageID, msg.Content); err != nil {
+			logger.GetLogger().Errorf("更新发送者群会话失败: userID=%d, groupID=%d, msgID=%d, err=%v", client.UserID, *msg.GroupID, messageID, err)
+		}
 	}
 
 	return messageID, true
@@ -486,4 +502,111 @@ func broadcastUserOnlineStatus(userID int64, isOnline bool) {
 			Manager.SendToUser(friendID, statusMessage)
 		}
 	}
+}
+
+// 处理消息撤回
+func handleRecallMessage(client *ClientInfo, message *WSMessage) {
+	// 解析撤回数据
+	recallDataMap, ok := message.Data.(map[string]interface{})
+	if !ok {
+		sendError(client, message.MsgID, "invalid recall data")
+		return
+	}
+
+	// 获取消息ID - 支持数字和字符串类型
+	var messageID int64
+	switch v := recallDataMap["message_id"].(type) {
+	case float64:
+		messageID = int64(v)
+	case int64:
+		messageID = v
+	case int:
+		messageID = int64(v)
+	case string:
+		// 尝试解析字符串形式的数字
+		parsed, err := strconv.ParseInt(v, 10, 64)
+		if err != nil {
+			sendError(client, message.MsgID, "invalid message_id format")
+			return
+		}
+		messageID = parsed
+	default:
+		sendError(client, message.MsgID, "message_id is required")
+		return
+	}
+
+	if messageID <= 0 {
+		sendError(client, message.MsgID, "invalid message_id")
+		return
+	}
+
+	// 调用服务层撤回消息
+	messageService := services.NewMessageService()
+	msg, notifyUserIDs, err := messageService.RecallMessage(messageID, client.UserID)
+	if err != nil {
+		// 发送撤回失败通知
+		errorResponse := WSMessage{
+			Type:   "chat",
+			Action: "recall_failed",
+			MsgID:  message.MsgID,
+			Data: gin.H{
+				"message_id": messageID,
+				"error":      err.Error(),
+			},
+		}
+		Manager.SendToUser(client.UserID, errorResponse)
+		logger.GetLogger().Infof("用户 %d 撤回消息 %d 失败: %v", client.UserID, messageID, err)
+		return
+	}
+
+	// 获取发送者信息
+	userCacheService := services.GetUserCacheService()
+	fromUser, userErr := userCacheService.GetUser(client.UserID)
+	if userErr != nil {
+		fromUser = &models.User{
+			ID:       client.UserID,
+			Nickname: client.Username,
+		}
+	}
+
+	// 发送撤回确认给发送者
+	ackResponse := WSMessage{
+		Type:   "chat",
+		Action: "recall_ack",
+		MsgID:  message.MsgID,
+		Data: gin.H{
+			"message_id": messageID,
+			"success":    true,
+		},
+	}
+	Manager.SendToUser(client.UserID, ackResponse)
+
+	// 构建撤回通知数据
+	recallNotifyData := gin.H{
+		"message_id":         messageID,
+		"from_user_id":       client.UserID,
+		"from_user_nickname": fromUser.Nickname,
+		"recalled_at":        time.Now().UTC().UnixMilli(),
+	}
+
+	// 添加会话标识
+	if msg.ToUserID != nil {
+		recallNotifyData["to_user_id"] = *msg.ToUserID
+	}
+	if msg.GroupID != nil {
+		recallNotifyData["group_id"] = *msg.GroupID
+	}
+
+	// 广播撤回通知给所有相关用户
+	recallNotify := WSMessage{
+		Type:   "chat",
+		Action: "recall_notify",
+		Data:   recallNotifyData,
+	}
+
+	for _, userID := range notifyUserIDs {
+		Manager.SendToUser(userID, recallNotify)
+	}
+
+	logger.GetLogger().Infof("用户 %d 撤回消息 %d 成功，通知用户数: %d", client.UserID, messageID, len(notifyUserIDs))
 }

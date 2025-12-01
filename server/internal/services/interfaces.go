@@ -38,6 +38,19 @@ type FriendServiceInterface interface {
 	SearchUsers(keyword string, currentUserID int64, limit int) ([]FriendInfo, error)
 }
 
+// FriendRequestServiceInterface 好友申请服务接口
+type FriendRequestServiceInterface interface {
+	SendRequest(fromUserID, toUserID int64, message string) (*models.FriendRequest, error)
+	GetReceivedRequests(userID int64, status *int, page, pageSize int) ([]FriendRequestInfo, int64, error)
+	GetSentRequests(userID int64, status *int, page, pageSize int) ([]FriendRequestInfo, int64, error)
+	AcceptRequest(requestID, userID int64) error
+	RejectRequest(requestID, userID int64) error
+	CancelRequest(requestID, userID int64) error
+	GetPendingCount(userID int64) (int64, error)
+	HasPendingRequest(fromUserID, toUserID int64) (bool, error)
+	GetRequestByID(requestID int64) (*models.FriendRequest, error)
+}
+
 // GroupServiceInterface 群组服务接口
 type GroupServiceInterface interface {
 	CreateGroup(group *models.Group) error

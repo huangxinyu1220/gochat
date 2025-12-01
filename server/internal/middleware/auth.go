@@ -3,6 +3,7 @@ package middleware
 import (
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 
 	"github.com/gin-gonic/gin"
@@ -76,6 +77,11 @@ func CORS(corsConfig *config.CORSConfig) gin.HandlerFunc {
 			}
 		}
 
+		// 如果不在白名单中，检查是否是内网来源（开发环境友好）
+		if !allowed && origin != "" {
+			allowed = isPrivateNetworkOrigin(origin)
+		}
+
 		// 设置 CORS 头部
 		if allowed {
 			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
@@ -99,6 +105,58 @@ func CORS(corsConfig *config.CORSConfig) gin.HandlerFunc {
 
 		c.Next()
 	}
+}
+
+// isPrivateNetworkOrigin 检查是否是内网来源
+// 支持: localhost, 127.x.x.x, 10.x.x.x, 172.16-31.x.x, 192.168.x.x
+func isPrivateNetworkOrigin(origin string) bool {
+	if origin == "" {
+		return false
+	}
+
+	parsedURL, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+
+	host := parsedURL.Hostname()
+
+	// localhost
+	if host == "localhost" {
+		return true
+	}
+
+	// 检查是否是私有 IP 地址
+	parts := strings.Split(host, ".")
+	if len(parts) != 4 {
+		return false
+	}
+
+	// 127.x.x.x (loopback)
+	if parts[0] == "127" {
+		return true
+	}
+
+	// 10.x.x.x (Class A private)
+	if parts[0] == "10" {
+		return true
+	}
+
+	// 192.168.x.x (Class C private)
+	if parts[0] == "192" && parts[1] == "168" {
+		return true
+	}
+
+	// 172.16.x.x - 172.31.x.x (Class B private)
+	if parts[0] == "172" {
+		second := 0
+		fmt.Sscanf(parts[1], "%d", &second)
+		if second >= 16 && second <= 31 {
+			return true
+		}
+	}
+
+	return false
 }
 
 // RequestLogger 请求日志中间件

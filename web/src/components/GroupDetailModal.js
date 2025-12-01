@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Modal, Avatar, List, Button, message, Checkbox } from 'antd';
 import { UserOutlined, CrownOutlined, TeamOutlined } from '@ant-design/icons';
 import { groupAPI, friendAPI } from '../services/api';
+import { getAvatarSrc } from '../utils/avatar';
 
 const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberInitially = false }) => {
   const [groupInfo, setGroupInfo] = useState(null);
@@ -11,16 +12,6 @@ const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberI
   const [friends, setFriends] = useState([]);
   const [selectedFriends, setSelectedFriends] = useState([]);
   const [addingMembers, setAddingMembers] = useState(false);
-
-  // 获取头像URL - 统一使用uploads/files目录
-  const getAvatarSrc = (avatar) => {
-    if (!avatar || avatar === 'default.png') {
-      return null;
-    }
-
-    const baseURL = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
-    return `${baseURL}/uploads/files/${avatar}`;
-  };
 
   useEffect(() => {
     if (visible && groupId) {
@@ -32,6 +23,7 @@ const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberI
       setShowAddMember(false);
       setSelectedFriends([]);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [visible, groupId, showAddMemberInitially]);
 
   // 当members加载完成且需要显示添加成员界面时，加载好友列表
@@ -39,7 +31,8 @@ const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberI
     if (showAddMember && visible && members.length > 0) {
       loadFriends();
     }
-  }, [showAddMember, members]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showAddMember, members, visible]);
 
   const loadGroupInfo = async () => {
     try {
@@ -80,11 +73,6 @@ const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberI
       console.error('加载好友列表失败:', error);
       message.error('加载好友列表失败');
     }
-  };
-
-  const handleShowAddMember = () => {
-    setShowAddMember(true);
-    loadFriends();
   };
 
   const handleCancelAddMember = () => {

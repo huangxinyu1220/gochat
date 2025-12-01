@@ -2,6 +2,7 @@ package services
 
 import (
 	"database/sql"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -25,6 +26,10 @@ type MessageInfo struct {
 	Content    string `json:"content"`
 	MsgType    int    `json:"msg_type"`
 	CreatedAt  int64  `json:"created_at"` // 改为int64毫秒时间戳
+
+	// 撤回相关
+	IsRecalled bool  `json:"is_recalled"`
+	RecalledAt int64 `json:"recalled_at,omitempty"` // 毫秒时间戳
 
 	// 发送者信息
 	FromUser struct {
@@ -213,6 +218,8 @@ func (s *MessageService) GetPrivateMessagesWithUserInfo(userID1, userID2 int64, 
 			m.id, m.from_user_id, m.to_user_id, m.group_id,
 			m.content, m.msg_type,
 			CAST(UNIX_TIMESTAMP(m.created_at) * 1000 AS SIGNED) as created_at,
+			m.is_recalled,
+			COALESCE(CAST(UNIX_TIMESTAMP(m.recalled_at) * 1000 AS SIGNED), 0) as recalled_at,
 			u.id as user_id, u.nickname as from_nickname, u.avatar as from_avatar
 		FROM messages m
 		JOIN users u ON m.from_user_id = u.id
@@ -234,6 +241,7 @@ func (s *MessageService) GetPrivateMessagesWithUserInfo(userID1, userID2 int64, 
 		err := rows.Scan(
 			&msg.ID, &msg.FromUserID, &toUserID, &groupID,
 			&msg.Content, &msg.MsgType, &msg.CreatedAt,
+			&msg.IsRecalled, &msg.RecalledAt,
 			&msg.FromUser.ID, &msg.FromUser.Nickname, &msg.FromUser.Avatar,
 		)
 		if err != nil {
@@ -297,6 +305,8 @@ func (s *MessageService) GetGroupMessagesWithUserInfo(groupID int64, page, pageS
 			m.id, m.from_user_id, m.to_user_id, m.group_id,
 			m.content, m.msg_type,
 			CAST(UNIX_TIMESTAMP(m.created_at) * 1000 AS SIGNED) as created_at,
+			m.is_recalled,
+			COALESCE(CAST(UNIX_TIMESTAMP(m.recalled_at) * 1000 AS SIGNED), 0) as recalled_at,
 			u.id as user_id, u.nickname as from_nickname, u.avatar as from_avatar
 		FROM messages m
 		JOIN users u ON m.from_user_id = u.id
@@ -318,6 +328,7 @@ func (s *MessageService) GetGroupMessagesWithUserInfo(groupID int64, page, pageS
 		err := rows.Scan(
 			&msg.ID, &msg.FromUserID, &toUserID, &groupID,
 			&msg.Content, &msg.MsgType, &msg.CreatedAt,
+			&msg.IsRecalled, &msg.RecalledAt,
 			&msg.FromUser.ID, &msg.FromUser.Nickname, &msg.FromUser.Avatar,
 		)
 		if err != nil {
@@ -344,4 +355,90 @@ func (s *MessageService) GetGroupMessagesWithUserInfo(groupID int64, page, pageS
 	}
 
 	return messages, total, nil
+}
+
+// RecallMessage 撤回消息
+// 返回: 撤回后的消息, 需要通知的用户ID列表, 错误
+func (s *MessageService) RecallMessage(messageID int64, userID int64) (*models.Message, []int64, error) {
+	var msg models.Message
+
+	// 1. 查询消息
+	if err := s.db.First(&msg, messageID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil, fmt.Errorf("消息不存在")
+		}
+		return nil, nil, err
+	}
+
+	// 2. 验证是否为消息发送者
+	if msg.FromUserID != userID {
+		return nil, nil, fmt.Errorf("只能撤回自己发送的消息")
+	}
+
+	// 3. 检查是否已被撤回
+	if msg.IsRecalled {
+		return nil, nil, fmt.Errorf("消息已被撤回")
+	}
+
+	// 4. 检查是否在撤回时限内（2分钟）
+	if time.Since(msg.CreatedAt) > models.MessageRecallTimeout {
+		return nil, nil, fmt.Errorf("消息已超过2分钟，无法撤回")
+	}
+
+	// 5. 更新消息为已撤回
+	now := time.Now().UTC()
+	if err := s.db.Model(&msg).Updates(map[string]interface{}{
+		"is_recalled": true,
+		"recalled_at": now,
+	}).Error; err != nil {
+		return nil, nil, err
+	}
+
+	msg.IsRecalled = true
+	msg.RecalledAt = &now
+
+	// 6. 失效相关缓存
+	cacheService := cache.GetCacheService()
+	if cacheService != nil {
+		if msg.GroupID != nil {
+			if err := cacheService.InvalidateMessageCache(0, *msg.GroupID, true); err != nil {
+				logger.GetLogger().Warnf("Failed to invalidate group message cache: %v", err)
+			}
+		} else if msg.ToUserID != nil {
+			if err := cacheService.InvalidateMessageCache(msg.FromUserID, *msg.ToUserID, false); err != nil {
+				logger.GetLogger().Warnf("Failed to invalidate private message cache: %v", err)
+			}
+		}
+	}
+
+	// 7. 确定需要通知的用户列表
+	var notifyUserIDs []int64
+	if msg.GroupID != nil {
+		// 群聊：获取所有群成员
+		var members []models.GroupMember
+		if err := s.db.Where("group_id = ?", *msg.GroupID).Find(&members).Error; err != nil {
+			logger.GetLogger().Warnf("Failed to get group members for recall notification: %v", err)
+		} else {
+			for _, m := range members {
+				notifyUserIDs = append(notifyUserIDs, m.UserID)
+			}
+		}
+	} else if msg.ToUserID != nil {
+		// 私聊：通知发送者和接收者
+		notifyUserIDs = append(notifyUserIDs, msg.FromUserID, *msg.ToUserID)
+	}
+
+	return &msg, notifyUserIDs, nil
+}
+
+// GetMessageByID 根据ID获取消息
+func (s *MessageService) GetMessageByID(messageID int64) (*models.Message, error) {
+	var msg models.Message
+	if err := s.db.First(&msg, messageID).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &msg, nil
 }

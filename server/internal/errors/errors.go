@@ -33,6 +33,11 @@ const (
 	ErrCodeGroupNotFound    ErrorCode = "GROUP_NOT_FOUND"
 	ErrCodeNotGroupMember   ErrorCode = "NOT_GROUP_MEMBER"
 	ErrCodeMessageNotFound  ErrorCode = "MESSAGE_NOT_FOUND"
+
+	// 消息撤回相关错误
+	ErrCodeRecallTimeout    ErrorCode = "RECALL_TIMEOUT"     // 超过撤回时限
+	ErrCodeNotMessageOwner  ErrorCode = "NOT_MESSAGE_OWNER"  // 非消息发送者
+	ErrCodeAlreadyRecalled  ErrorCode = "ALREADY_RECALLED"   // 消息已被撤回
 )
 
 // AppError 应用程序错误类型

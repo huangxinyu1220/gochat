@@ -234,47 +234,18 @@ func RateLimit(config *RateLimitConfig) gin.HandlerFunc {
 // SecurityHeaders 安全头中间件
 func SecurityHeaders() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// Content Security Policy - 防止XSS攻击
-		c.Header("Content-Security-Policy",
-			"default-src 'self'; "+
-			"script-src 'self' 'unsafe-inline' 'unsafe-eval'; "+
-			"style-src 'self' 'unsafe-inline'; "+
-			"img-src 'self' data: blob: https:; "+
-			"font-src 'self' data:; "+
-			"connect-src 'self' ws: wss:; "+
-			"media-src 'self'; "+
-			"object-src 'none'; "+
-			"frame-ancestors 'none'")
-
-		// X-Content-Type-Options - 防止MIME类型嗅探
+		// 基本安全头设置
 		c.Header("X-Content-Type-Options", "nosniff")
-
-		// X-Frame-Options - 防止点击劫持
 		c.Header("X-Frame-Options", "DENY")
-
-		// X-XSS-Protection - 启用XSS过滤
 		c.Header("X-XSS-Protection", "1; mode=block")
-
-		// Referrer-Policy - 控制referrer信息
 		c.Header("Referrer-Policy", "strict-origin-when-cross-origin")
 
-		// Strict-Transport-Security - 强制HTTPS（仅在HTTPS时启用）
+		// 强制HTTPS（仅在HTTPS时启用）
 		if c.Request.TLS != nil || c.GetHeader("X-Forwarded-Proto") == "https" {
 			c.Header("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload")
 		}
 
-		// Feature-Policy / Permissions-Policy - 控制浏览器功能
-		c.Header("Permissions-Policy",
-			"accelerometer=(), "+
-			"camera=(), "+
-			"geolocation=(), "+
-			"gyroscope=(), "+
-			"magnetometer=(), "+
-			"microphone=(), "+
-			"payment=(), "+
-			"usb=()")
-
-		// Cache-Control - 安全的缓存策略
+		// API缓存策略
 		if strings.HasPrefix(c.Request.URL.Path, "/api/") {
 			c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
 			c.Header("Pragma", "no-cache")

@@ -1,6 +1,7 @@
 import React, { useEffect, useRef } from 'react';
 import { Avatar } from 'antd';
 import { UserOutlined } from '@ant-design/icons';
+import { getAvatarSrc } from '../utils/avatar';
 
 /**
  * 群聊九宫格头像组件 - 改进版
@@ -9,16 +10,6 @@ import { UserOutlined } from '@ant-design/icons';
  */
 const GroupAvatar = ({ members = [], size = 40 }) => {
   const canvasRef = useRef(null);
-
-  // 获取头像URL - 统一使用uploads/files目录
-  const getAvatarSrc = (avatar) => {
-    if (!avatar || avatar === 'default.png') {
-      return null;
-    }
-
-    const baseURL = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
-    return `${baseURL}/uploads/files/${avatar}`;
-  };
 
   // 计算统一的网格布局
   const calculateGridLayout = (count, totalSize) => {
@@ -131,14 +122,16 @@ const GroupAvatar = ({ members = [], size = 40 }) => {
       const { x, y, size: itemSize } = pos;
 
       // 如果有头像URL，加载并绘制
-      if (member.avatar) {
+      const avatarSrc = getAvatarSrc(member.avatar);
+      if (avatarSrc) {
         return new Promise((resolve) => {
           const img = new Image();
-          img.crossOrigin = 'anonymous';
-          
+          // 移除crossOrigin设置，避免CORS预检问题
+          // img.crossOrigin = 'anonymous';
+
           img.onload = () => {
             ctx.save();
-            
+
             // 创建圆角裁剪路径
             const radius = Math.min(itemSize * 0.15, 8);
             ctx.beginPath();
@@ -159,14 +152,14 @@ const GroupAvatar = ({ members = [], size = 40 }) => {
             ctx.restore();
             resolve();
           };
-          
+
           img.onerror = () => {
             // 加载失败，绘制默认头像
             drawDefaultAvatar(ctx, x, y, itemSize, member.nickname);
             resolve();
           };
-          
-          img.src = getAvatarSrc(member.avatar);
+
+          img.src = avatarSrc;
         });
       } else {
         // 绘制默认头像（昵称首字母）

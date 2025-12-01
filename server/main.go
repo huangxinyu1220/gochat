@@ -15,6 +15,7 @@ import (
 	"gochat/internal/config"
 	"gochat/internal/database"
 	"gochat/internal/logger"
+	"gochat/internal/notification"
 	"gochat/internal/routes"
 	"gochat/internal/tasks"
 	"gochat/internal/websocket"
@@ -74,6 +75,12 @@ func main() {
 	// 启动WebSocket清理协程
 	websocket.Manager.StartCleanup()
 	log.Info("WebSocket cleanup routine started")
+
+	// 初始化通知系统的消息发送器
+	notification.SetMessageSender(func(userID int64, message interface{}) bool {
+		return websocket.Manager.SendToUser(userID, message)
+	})
+	log.Info("Notification message sender initialized")
 
 	// 启动文件清理定时任务
 	fileCleanupTask := tasks.NewFileCleanupTask()

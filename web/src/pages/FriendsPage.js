@@ -1,28 +1,54 @@
-import React, { useState, useEffect } from 'react';
-import { Input, Button, List, Avatar, Card, Space, message, Modal, Typography, Tag } from 'antd';
-import { UserAddOutlined, DeleteOutlined, SearchOutlined } from '@ant-design/icons';
-import { friendAPI, userAPI } from '../services/api';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Input, Button, List, Avatar, Card, Space, message, Modal, Typography, Tag, Tabs, Badge } from 'antd';
+import { UserAddOutlined, DeleteOutlined, SearchOutlined, UserOutlined } from '@ant-design/icons';
+import { friendAPI, userAPI, friendRequestAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { useWebSocket } from '../context/WebSocketContext';
+import AddFriendModal from '../components/AddFriendModal';
+import FriendRequestList from '../components/FriendRequestList';
 
 const { Title, Text } = Typography;
 const { Search } = Input;
 
 const FriendsPage = () => {
   const { user } = useAuth();
+  const { registerMessageHandler } = useWebSocket();
   const [friends, setFriends] = useState([]);
   const [searchResults, setSearchResults] = useState([]);
   const [loading, setLoading] = useState(false);
   const [searching, setSearching] = useState(false);
+  const [activeTab, setActiveTab] = useState('friends');
+  const [pendingCount, setPendingCount] = useState(0);
+
+  // 添加好友弹窗状态
+  const [addModalVisible, setAddModalVisible] = useState(false);
+  const [selectedUser, setSelectedUser] = useState(null);
+
+  // 用于刷新申请列表的ref
+  const receivedListRef = useRef(null);
+  const sentListRef = useRef(null);
+
+  // 加载待处理申请数量
+  const loadPendingCount = useCallback(async () => {
+    try {
+      const response = await friendRequestAPI.getPendingCount();
+      if (response?.data) {
+        setPendingCount(response.data.count || 0);
+      }
+    } catch (error) {
+      console.error('加载待处理数量失败:', error);
+    }
+  }, []);
 
   // 加载好友列表
-  const loadFriends = async () => {
+  const loadFriends = useCallback(async () => {
     try {
       const response = await friendAPI.getFriends();
-      setFriends(response.data);
+      setFriends(response.data || []);
     } catch (error) {
       message.error('加载好友列表失败');
     }
-  };
+  }, []);
 
   // 搜索用户
   const handleSearch = async (value) => {
@@ -34,7 +60,7 @@ const FriendsPage = () => {
     setSearching(true);
     try {
       const response = await userAPI.searchUsers(value);
-      setSearchResults(response.data);
+      setSearchResults(response.data || []);
     } catch (error) {
       message.error('搜索失败');
     } finally {
@@ -42,20 +68,54 @@ const FriendsPage = () => {
     }
   };
 
-  // 添加好友
-  const handleAddFriend = async (friendId, friendName) => {
-    setLoading(true);
+  // 打开添加好友弹窗
+  const handleOpenAddModal = (targetUser) => {
+    setSelectedUser(targetUser);
+    setAddModalVisible(true);
+  };
+
+  // 添加好友成功回调
+  const handleAddSuccess = () => {
+    setAddModalVisible(false);
+    // 更新搜索结果中该用户的状态为"已发送"
+    if (selectedUser) {
+      setSearchResults(prev => prev.map(u =>
+        u.id === selectedUser.id
+          ? { ...u, request_status: 'sent' }
+          : u
+      ));
+    }
+    setSelectedUser(null);
+    // 刷新发出的申请列表
+    if (sentListRef.current?.refresh) {
+      sentListRef.current.refresh();
+    }
+  };
+
+  // 从搜索结果中同意好友申请
+  const handleAcceptRequestFromSearch = async (targetUser) => {
+    if (!targetUser.request_id) {
+      message.error('申请信息不完整');
+      return;
+    }
+
     try {
-      await friendAPI.addFriend(friendId);
-      message.success(`已发送好友请求给 ${friendName}`);
-      // 刷新搜索结果或者移除已添加的用户
-      setSearchResults(searchResults.filter(user => user.id !== friendId));
-      // 重新加载好友列表
+      await friendRequestAPI.acceptRequest(targetUser.request_id);
+      message.success(`已同意 ${targetUser.nickname} 的好友申请`);
+
+      // 更新搜索结果中该用户的状态为"已是好友"
+      setSearchResults(prev => prev.map(u =>
+        u.id === targetUser.id
+          ? { ...u, is_friend: true, request_status: 'none' }
+          : u
+      ));
+
+      // 重新加载好友列表和待处理数量
       loadFriends();
+      loadPendingCount();
     } catch (error) {
-      message.error(error.response?.data?.message || '添加好友失败');
-    } finally {
-      setLoading(false);
+      const errorMsg = error?.message || error?.error || '同意申请失败';
+      message.error(errorMsg);
     }
   };
 
@@ -70,7 +130,6 @@ const FriendsPage = () => {
         try {
           await friendAPI.removeFriend(friendId);
           message.success(`已删除好友 ${friendName}`);
-          // 重新加载好友列表
           loadFriends();
         } catch (error) {
           message.error('删除好友失败');
@@ -79,9 +138,140 @@ const FriendsPage = () => {
     });
   };
 
+  // 同意申请后的回调
+  const handleAcceptRequest = () => {
+    loadFriends();
+    loadPendingCount();
+  };
+
+  // 处理WebSocket好友申请消息
+  useEffect(() => {
+    const handleWebSocketMessage = (eventType, data) => {
+      // 只处理friend-request类型的消息
+      if (eventType !== 'friend-request' || !data) return;
+
+      switch (data.type) {
+        case 'new_request':
+          // 收到新申请，更新待处理数量并显示通知
+          loadPendingCount();
+          message.info(`收到来自 ${data.data?.from_user?.nickname || '某人'} 的好友申请`);
+          // 如果当前在收到的申请tab，刷新列表
+          if (activeTab === 'received' && receivedListRef.current?.refresh) {
+            receivedListRef.current.refresh();
+          }
+          break;
+        case 'request_accepted':
+          // 申请被接受，刷新好友列表
+          message.success(`${data.data?.friend?.nickname || '对方'} 已接受你的好友申请`);
+          loadFriends();
+          // 刷新发出的申请列表
+          if (sentListRef.current?.refresh) {
+            sentListRef.current.refresh();
+          }
+          break;
+        case 'request_rejected':
+          // 申请被拒绝
+          message.info('你的好友申请被拒绝');
+          // 刷新发出的申请列表
+          if (sentListRef.current?.refresh) {
+            sentListRef.current.refresh();
+          }
+          break;
+        case 'pending_count':
+          // 更新待处理数量
+          setPendingCount(data.data?.count || 0);
+          break;
+        default:
+          break;
+      }
+    };
+
+    const unregister = registerMessageHandler(handleWebSocketMessage);
+    return () => unregister && unregister();
+  }, [registerMessageHandler, activeTab, loadFriends, loadPendingCount]);
+
   useEffect(() => {
     loadFriends();
-  }, []);
+    loadPendingCount();
+  }, [loadFriends, loadPendingCount]);
+
+  // Tab项配置
+  const tabItems = [
+    {
+      key: 'friends',
+      label: `好友列表 (${friends.length})`,
+      children: (
+        <Card size="small" bordered={false}>
+          {friends.length === 0 ? (
+            <div style={{ textAlign: 'center', padding: '40px' }}>
+              <Text type="secondary">你还没有好友，快去搜索并添加吧！</Text>
+            </div>
+          ) : (
+            <List
+              dataSource={friends}
+              renderItem={(friend) => (
+                <List.Item
+                  actions={[
+                    <Button
+                      type="text"
+                      danger
+                      icon={<DeleteOutlined />}
+                      size="small"
+                      onClick={() => handleRemoveFriend(friend.id, friend.nickname)}
+                    >
+                      删除
+                    </Button>
+                  ]}
+                >
+                  <List.Item.Meta
+                    avatar={
+                      <Avatar
+                        icon={<UserOutlined />}
+                        src={friend.avatar ? `/uploads/${friend.avatar}` : undefined}
+                      >
+                        {friend.nickname?.[0]}
+                      </Avatar>
+                    }
+                    title={<Text strong>{friend.nickname}</Text>}
+                    description={friend.phone}
+                  />
+                </List.Item>
+              )}
+            />
+          )}
+        </Card>
+      ),
+    },
+    {
+      key: 'received',
+      label: (
+        <Badge count={pendingCount} size="small" offset={[10, 0]}>
+          收到的申请
+        </Badge>
+      ),
+      children: (
+        <Card size="small" bordered={false}>
+          <FriendRequestList
+            type="received"
+            ref={receivedListRef}
+            onAccept={handleAcceptRequest}
+          />
+        </Card>
+      ),
+    },
+    {
+      key: 'sent',
+      label: '发出的申请',
+      children: (
+        <Card size="small" bordered={false}>
+          <FriendRequestList
+            type="sent"
+            ref={sentListRef}
+          />
+        </Card>
+      ),
+    },
+  ];
 
   return (
     <div style={{ padding: '24px' }}>
@@ -108,106 +298,90 @@ const FriendsPage = () => {
           <Card title={`搜索结果 (${searchResults.length})`} size="small">
             <List
               dataSource={searchResults}
-              renderItem={(item) => (
-                <List.Item
-                  actions={[
-                    item.is_friend ? (
-                      <Tag color="blue">已是好友</Tag>
-                    ) : (
+              renderItem={(item) => {
+                const requestStatus = item.request_status || 'none';
+
+                // 根据状态渲染不同的按钮
+                const renderActionButton = () => {
+                  if (item.is_friend) {
+                    return <Tag color="blue">已是好友</Tag>;
+                  }
+                  if (requestStatus === 'sent') {
+                    return <Tag color="orange">已发送申请</Tag>;
+                  }
+                  if (requestStatus === 'received') {
+                    return (
                       <Button
                         type="primary"
                         size="small"
-                        disabled={loading}
-                        onClick={() => handleAddFriend(item.id, item.nickname)}
-                        style={{
-                          minWidth: '80px',
-                          width: '80px',
-                          height: '28px',
-                          display: 'flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          position: 'relative'
-                        }}
+                        onClick={() => handleAcceptRequestFromSearch(item)}
+                        style={{ backgroundColor: '#52c41a', borderColor: '#52c41a' }}
                       >
-                        {loading ? (
-                          <span style={{
-                            fontSize: '12px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            width: '100%'
-                          }}>
-                            <UserAddOutlined style={{ marginRight: '4px' }} />
-                            处理中
-                          </span>
-                        ) : (
-                          <span style={{
-                            fontSize: '12px',
-                            display: 'flex',
-                            alignItems: 'center',
-                            justifyContent: 'center',
-                            width: '100%'
-                          }}>
-                            <UserAddOutlined style={{ marginRight: '4px' }} />
-                            添加好友
-                          </span>
-                        )}
+                        同意申请
                       </Button>
-                    )
-                  ]}
-                >
-                  <List.Item.Meta
-                    avatar={<Avatar src={item.avatar}>{item.nickname[0]}</Avatar>}
-                    title={
-                      <Space>
-                        <Text strong>{item.nickname}</Text>
-                        <Text type="secondary" style={{ fontSize: '12px' }}>
-                          {item.phone}
-                        </Text>
-                      </Space>
-                    }
-                    description={item.phone}
-                  />
-                </List.Item>
-              )}
+                    );
+                  }
+                  // 默认：可以添加好友
+                  return (
+                    <Button
+                      type="primary"
+                      size="small"
+                      icon={<UserAddOutlined />}
+                      onClick={() => handleOpenAddModal(item)}
+                    >
+                      添加好友
+                    </Button>
+                  );
+                };
+
+                return (
+                  <List.Item actions={[renderActionButton()]}>
+                    <List.Item.Meta
+                      avatar={
+                        <Avatar
+                          icon={<UserOutlined />}
+                          src={item.avatar ? `/uploads/${item.avatar}` : undefined}
+                        >
+                          {item.nickname?.[0]}
+                        </Avatar>
+                      }
+                      title={
+                        <Space>
+                          <Text strong>{item.nickname}</Text>
+                          <Text type="secondary" style={{ fontSize: '12px' }}>
+                            {item.phone}
+                          </Text>
+                        </Space>
+                      }
+                      description={item.phone}
+                    />
+                  </List.Item>
+                );
+              }}
             />
           </Card>
         )}
 
-        {/* 好友列表 */}
-        <Card title={`我的好友 (${friends.length})`} size="small">
-          {friends.length === 0 ? (
-            <div style={{ textAlign: 'center', padding: '40px' }}>
-              <Text type="secondary">你还没有好友，快去搜索并添加吧！</Text>
-            </div>
-          ) : (
-            <List
-              dataSource={friends}
-              renderItem={(friend) => (
-                <List.Item
-                  actions={[
-                    <Button
-                      type="text"
-                      danger
-                      icon={<DeleteOutlined />}
-                      size="small"
-                      onClick={() => handleRemoveFriend(friend.id, friend.nickname)}
-                    >
-                      删除好友
-                    </Button>
-                  ]}
-                >
-                  <List.Item.Meta
-                    avatar={<Avatar src={friend.avatar}>{friend.nickname[0]}</Avatar>}
-                    title={<Text strong>{friend.nickname}</Text>}
-                    description={friend.phone}
-                  />
-                </List.Item>
-              )}
-            />
-          )}
+        {/* 好友和申请列表 Tabs */}
+        <Card size="small">
+          <Tabs
+            activeKey={activeTab}
+            onChange={setActiveTab}
+            items={tabItems}
+          />
         </Card>
       </Space>
+
+      {/* 添加好友弹窗 */}
+      <AddFriendModal
+        visible={addModalVisible}
+        targetUser={selectedUser}
+        onSuccess={handleAddSuccess}
+        onCancel={() => {
+          setAddModalVisible(false);
+          setSelectedUser(null);
+        }}
+      />
     </div>
   );
 };

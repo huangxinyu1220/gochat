@@ -58,8 +58,9 @@ func Migrate() error {
 		&models.GroupMember{},
 		&models.Message{},
 		&models.Conversation{},
-		&models.FileStorage{},    // 新增：文件存储表
-		&models.FileReference{},  // 新增：文件引用表
+		&models.FileStorage{},
+		&models.FileReference{},
+		&models.FriendRequest{}, // 新增：好友申请表
 	)
 
 	// 重新启用外键检查

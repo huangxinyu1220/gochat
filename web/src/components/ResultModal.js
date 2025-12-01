@@ -1,11 +1,10 @@
 import React from 'react';
 import { Modal } from 'antd';
-import { 
-  CheckCircleOutlined, 
-  ExclamationCircleOutlined, 
+import {
+  CheckCircleOutlined,
+  ExclamationCircleOutlined,
   CloseCircleOutlined,
-  ReloadOutlined,
-  WifiOutlined 
+  WifiOutlined
 } from '@ant-design/icons';
 import { SIZES } from '../constants/styles';
 

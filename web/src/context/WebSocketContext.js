@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState, useRef } from 'r
 import { App } from 'antd';
 import WebSocketClient from '../services/websocket';
 import { useAuth } from './AuthContext';
+import { getWsUrl } from '../config';
 
 const WebSocketContext = createContext(null);
 
@@ -32,7 +33,7 @@ export const WebSocketProvider = ({ children }) => {
         return;
       }
 
-      const client = new WebSocketClient('ws://localhost:8080/ws', token);
+      const client = new WebSocketClient(getWsUrl(), token);
 
       // 连接成功事件
       client.on('connected', () => {
@@ -129,6 +130,31 @@ export const WebSocketProvider = ({ children }) => {
             handler('message-ack', data);
           } catch (error) {
             console.error('[WebSocket] 消息确认处理器错误:', error);
+          }
+        });
+      });
+
+      // 添加好友申请消息处理
+      client.on('friend-request', (data) => {
+        console.log('[WebSocket] 好友申请消息:', data);
+        // 通知所有注册的消息处理器
+        messageHandlersRef.current.forEach(handler => {
+          try {
+            handler('friend-request', data);
+          } catch (error) {
+            console.error('[WebSocket] 好友申请处理器错误:', error);
+          }
+        });
+      });
+
+      // 添加消息撤回通知处理
+      client.on('recall-notify', (data) => {
+        // 通知所有注册的消息处理器
+        messageHandlersRef.current.forEach(handler => {
+          try {
+            handler('recall-notify', data);
+          } catch (error) {
+            console.error('[WebSocket] 撤回通知处理器错误:', error);
           }
         });
       });

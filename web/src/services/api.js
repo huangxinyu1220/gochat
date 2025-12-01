@@ -1,17 +1,26 @@
 import axios from 'axios';
+import { getApiBaseUrl } from '../config';
 
-// 创建axios实例
+// 创建axios实例 - 不设置固定 baseURL，在拦截器中动态设置
 const api = axios.create({
-  baseURL: process.env.REACT_APP_API_BASE_URL || '/api/v1',
   timeout: 10000,
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
-// 请求拦截器 - 添加认证token
+// 请求拦截器 - 动态设置 baseURL 和添加认证 token
 api.interceptors.request.use(
   (config) => {
+    // 动态获取 baseURL（支持跨机器访问）
+    const baseURL = getApiBaseUrl();
+    config.baseURL = baseURL;
+
+    // 开发环境下输出调试信息
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[API] Request:', config.method?.toUpperCase(), baseURL + config.url);
+    }
+
     const token = localStorage.getItem('token');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
@@ -85,6 +94,21 @@ export const userAPI = {
     });
   },
 
+  // 上传语音文件
+  uploadVoice: (file, duration) => {
+    const formData = new FormData();
+    // 为文件添加正确的文件名和扩展名
+    const extension = file.extension || '.webm';
+    const fileName = `voice_${Date.now()}${extension}`;
+    formData.append('voice', file, fileName);
+    formData.append('duration', duration.toString());
+    return api.post('/upload/voice', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+  },
+
   // 搜索用户
   searchUsers: (keyword) => api.get('/user/search', { params: { keyword } }),
 };
@@ -93,11 +117,42 @@ export const friendAPI = {
   // 获取好友列表
   getFriends: () => api.get('/friend/list'),
 
-  // 添加好友
+  // 添加好友（直接添加，保留兼容性）
   addFriend: (friendId) => api.post('/friend/add', { friend_id: friendId }),
 
   // 删除好友
   removeFriend: (friendId) => api.delete(`/friend/${friendId}`),
+};
+
+// 好友申请API
+export const friendRequestAPI = {
+  // 发送好友申请
+  sendRequest: (toUserId, message = '') =>
+    api.post('/friend/request', { to_user_id: toUserId, message }),
+
+  // 获取收到的申请
+  getReceivedRequests: (params = {}) =>
+    api.get('/friend/request/received', { params }),
+
+  // 获取发出的申请
+  getSentRequests: (params = {}) =>
+    api.get('/friend/request/sent', { params }),
+
+  // 同意申请
+  acceptRequest: (requestId) =>
+    api.post(`/friend/request/${requestId}/accept`),
+
+  // 拒绝申请
+  rejectRequest: (requestId) =>
+    api.post(`/friend/request/${requestId}/reject`),
+
+  // 取消申请
+  cancelRequest: (requestId) =>
+    api.delete(`/friend/request/${requestId}`),
+
+  // 获取待处理申请数量
+  getPendingCount: () =>
+    api.get('/friend/request/pending-count'),
 };
 
 export const groupAPI = {

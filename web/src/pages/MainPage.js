@@ -1,9 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Avatar, Typography, Button, List, Badge, message, Input, Modal, Tag, Card, Divider, Row, Col, App, Dropdown } from 'antd';
-import { LogoutOutlined, UserOutlined, TeamOutlined, WechatOutlined, CloseOutlined, DeleteOutlined, SearchOutlined, UserAddOutlined, SmileOutlined, PictureOutlined, AudioOutlined, LoadingOutlined, PlusOutlined } from '@ant-design/icons';
+import { LogoutOutlined, UserOutlined, TeamOutlined, WechatOutlined, CloseOutlined, DeleteOutlined, SearchOutlined, UserAddOutlined, SmileOutlined, PictureOutlined, AudioOutlined, LoadingOutlined, PlusOutlined, BellOutlined } from '@ant-design/icons';
 import { useAuth } from '../context/AuthContext';
 import { useWebSocket } from '../context/WebSocketContext'; // 新增导入
-import { conversationAPI, friendAPI, userAPI, groupAPI } from '../services/api';
+import { conversationAPI, friendAPI, userAPI, groupAPI, friendRequestAPI } from '../services/api';
 import ChatInterface from '../components/ChatInterface';
 import ProfileEditModal from '../components/ProfileEditModal';
 import EmojiPicker from '../components/EmojiPicker';
@@ -11,8 +11,10 @@ import CreateGroupModal from '../components/CreateGroupModal';
 import GroupAvatar from '../components/GroupAvatar';
 import GroupMembersSidebar from '../components/GroupMembersSidebar';
 import GroupDetailModal from '../components/GroupDetailModal';
+import FriendRequestPanel from '../components/FriendRequestPanel';
 import { getNameInitial } from '../utils/chinesePinyin';
 import { getAvatarSrc, updateAvatarCacheVersion } from '../utils/avatar';
+import { useAudioRecorder } from '../hooks/useAudioRecorder';
 
 // 企业微信风格布局的IM界面
 const MainPage = () => {
@@ -26,6 +28,14 @@ const MainPage = () => {
       @keyframes spin {
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
+      }
+      @keyframes blink {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+      }
+      @keyframes voiceWave {
+        0%, 100% { height: 8px; }
+        50% { height: 24px; }
       }
     `;
     document.head.appendChild(style);
@@ -124,6 +134,11 @@ const MainPage = () => {
       return '[图片]';
     }
 
+    // 如果是语音消息，显示 [语音]
+    if (msgType === 3) {
+      return '[语音]';
+    }
+
     // 文本消息直接显示
     return content;
   };
@@ -146,6 +161,16 @@ const MainPage = () => {
   const [addFriendSearchValue, setAddFriendSearchValue] = useState('');
   const [hasSearchedFriend, setHasSearchedFriend] = useState(false);
 
+  // 发送好友申请确认弹窗状态
+  const [sendRequestModalVisible, setSendRequestModalVisible] = useState(false);
+  const [sendRequestTarget, setSendRequestTarget] = useState(null);
+  const [sendRequestMessage, setSendRequestMessage] = useState('');
+  const [sendingRequest, setSendingRequest] = useState(false);
+
+  // 好友申请面板相关状态
+  const [friendRequestPanelVisible, setFriendRequestPanelVisible] = useState(false);
+  const [friendRequestCount, setFriendRequestCount] = useState(0);
+
   // 个人信息编辑相关状态
   const [profileEditModalVisible, setProfileEditModalVisible] = useState(false);
 
@@ -157,7 +182,7 @@ const MainPage = () => {
   const [showAddMemberInitially, setShowAddMemberInitially] = useState(false);
 
   // 群成员侧边栏显示状态
-  const [groupMembersSidebarVisible, setGroupMembersSidebarVisible] = useState(true);
+  const [groupMembersSidebarVisible, setGroupMembersSidebarVisible] = useState(false);
 
   // 群成员缓存（用于九宫格头像）
   const [groupMembersCache, setGroupMembersCache] = useState({});
@@ -196,125 +221,139 @@ const MainPage = () => {
   const imageInputRef = React.useRef(null);
   const chatInterfaceRef = React.useRef(null);
 
-  // 加载数据
+  // 用于防止 loadConversations 覆盖乐观更新的时间戳
+  // 当发送消息时记录时间，loadConversations 会检查是否在短时间内有乐观更新
+  const lastOptimisticUpdateRef = React.useRef(0);
+
+  // 语音录制相关 - 使用 useAudioRecorder hook
+  const {
+    isRecording,
+    duration: recordingDuration,
+    audioBlob,
+    error: recordingError,
+    startRecording,
+    stopRecording,
+    cancelRecording,
+    isValidDuration,
+    formatDuration,
+  } = useAudioRecorder();
+
+  const [voiceUploading, setVoiceUploading] = useState(false);
+
+  // 处理录音错误提示
   useEffect(() => {
-    if (activeNav === 'conversations') {
-      loadConversations();
-    } else if (activeNav === 'friends') {
-      loadFriends();
+    if (recordingError) {
+      message.error(recordingError);
     }
-  }, [activeNav]);
+  }, [recordingError]);
 
-  // 注册WebSocket消息处理器，用于实时更新会话列表
+  // 处理录音完成后自动发送
   useEffect(() => {
-    if (!registerMessageHandler) return;
+    if (audioBlob && !isRecording && isValidDuration()) {
+      handleVoiceSend(audioBlob, recordingDuration);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [audioBlob, isRecording]);
 
-    const handleGlobalMessage = (type, data) => {
-      if (type === 'message') {
-        // 收到新消息时更新会话列表
-        setConversations(prev => {
-          const updatedConversations = prev.map(conv => {
-            // 单聊消息
-            if (data.group_id === undefined && conv.target_id === data.from_user_id && conv.type === 1) {
-              return {
-                ...conv,
-                last_msg_content: data.content,
-                last_msg_time: data.created_at,
-                unread_count: conv.unread_count + 1,
-              };
-            }
-            // 群聊消息
-            if (data.group_id !== undefined && conv.target_id === data.group_id && conv.type === 2) {
-              return {
-                ...conv,
-                last_msg_content: data.content,
-                last_msg_time: data.created_at,
-                unread_count: conv.unread_count + 1,
-              };
-            }
-            return conv;
-          });
+  // 语音发送处理
+  const handleVoiceSend = async (blob, duration) => {
+    if (!selectedItem || !wsClient) {
+      message.error('请先选择会话');
+      return;
+    }
 
-          // 如果没有找到对应会话，创建新会话（仅单聊）
-          const existingConv = prev.find(conv =>
-            (data.group_id === undefined && conv.target_id === data.from_user_id && conv.type === 1) ||
-            (data.group_id !== undefined && conv.target_id === data.group_id && conv.type === 2)
+    setVoiceUploading(true);
+    try {
+      // 上传语音到服务器
+      const response = await userAPI.uploadVoice(blob, duration);
+      const voiceUrl = response.data.voice_url;
+      const serverDuration = response.data.duration || duration;
+
+      // 使用 url|duration 格式存储，便于前端解析
+      const content = `${voiceUrl}|${serverDuration.toFixed(1)}`;
+
+      // 通过 WebSocket 发送语音消息
+      const msgId = wsClient.sendChatMessage(selectedItem.target_id, content, 3, selectedItem.type);
+
+      if (msgId) {
+        // 记录乐观更新时间，防止 loadConversations 覆盖
+        lastOptimisticUpdateRef.current = Date.now();
+
+        // 更新会话列表并置顶
+        const now = new Date().toISOString();
+        const updateAndMoveToTop = (prev) => {
+          const updatedList = prev.map(conv =>
+            conv.id === selectedItem.id
+              ? {
+                  ...conv,
+                  last_msg_content: '[语音]',
+                  last_msg_time: now,
+                  last_msg_type: 3,
+                }
+              : conv
           );
+          const currentConv = updatedList.find(conv => conv.id === selectedItem.id);
+          const otherConvs = updatedList.filter(conv => conv.id !== selectedItem.id);
+          return currentConv ? [currentConv, ...otherConvs] : updatedList;
+        };
+        setConversations(updateAndMoveToTop);
+        setFilteredConversations(updateAndMoveToTop);
 
-          if (!existingConv && data.from_user && data.group_id === undefined) {
-            // 创建新单聊会话
-            const newConversation = {
-              id: Date.now(), // 临时ID
-              type: 1, // 单聊
-              target_id: data.from_user_id,
-              target_name: data.from_user.nickname,
-              target_avatar: data.from_user.avatar,
-              last_msg_content: data.content,
-              last_msg_time: data.created_at,
-              unread_count: 1,
-            };
-            return [newConversation, ...updatedConversations];
-          }
-
-          return updatedConversations;
-        });
-
-        // 同时更新过滤后的会话列表
-        setFilteredConversations(prev => {
-          const updatedConversations = prev.map(conv => {
-            // 单聊消息
-            if (data.group_id === undefined && conv.target_id === data.from_user_id && conv.type === 1) {
-              return {
-                ...conv,
-                last_msg_content: data.content,
-                last_msg_time: data.created_at,
-                unread_count: conv.unread_count + 1,
-              };
-            }
-            // 群聊消息
-            if (data.group_id !== undefined && conv.target_id === data.group_id && conv.type === 2) {
-              return {
-                ...conv,
-                last_msg_content: data.content,
-                last_msg_time: data.created_at,
-                unread_count: conv.unread_count + 1,
-              };
-            }
-            return conv;
-          });
-
-          const existingConv = prev.find(conv =>
-            (data.group_id === undefined && conv.target_id === data.from_user_id && conv.type === 1) ||
-            (data.group_id !== undefined && conv.target_id === data.group_id && conv.type === 2)
-          );
-
-          if (!existingConv && data.from_user && data.group_id === undefined) {
-            const newConversation = {
-              id: Date.now(),
-              type: 1,
-              target_id: data.from_user_id,
-              target_name: data.from_user.nickname,
-              target_avatar: data.from_user.avatar,
-              last_msg_content: data.content,
-              last_msg_time: data.created_at,
-              unread_count: 1,
-            };
-            return [newConversation, ...updatedConversations];
-          }
-
-          return updatedConversations;
-        });
+        // 通过 ref 触发 ChatInterface 更新
+        if (chatInterfaceRef.current?.handleSendMessage) {
+          chatInterfaceRef.current.handleSendMessage(content, 3);
+        }
       }
+    } catch (error) {
+      console.error('语音上传失败:', error);
+      message.error(error.response?.data?.message || '语音发送失败');
+    } finally {
+      setVoiceUploading(false);
+    }
+  };
+
+  // 消息发送后更新会话列表（稳定引用）- 同时置顶会话
+  const handleMessageSent = useCallback((content, msgType = 1) => {
+    if (!selectedItem) return;
+
+    // 记录乐观更新时间，防止 loadConversations 覆盖
+    lastOptimisticUpdateRef.current = Date.now();
+
+    const displayContent = msgType === 2 ? '[图片]' : (msgType === 3 ? '[语音]' : content);
+    const now = new Date().toISOString();
+
+    // 更新并置顶会话
+    const updateAndMoveToTop = (prev) => {
+      const updatedList = prev.map(conv =>
+        conv.id === selectedItem.id
+          ? {
+              ...conv,
+              last_msg_content: displayContent,
+              last_msg_time: now,
+              last_msg_type: msgType,
+            }
+          : conv
+      );
+      // 找到当前会话并移到最前面
+      const currentConv = updatedList.find(conv => conv.id === selectedItem.id);
+      const otherConvs = updatedList.filter(conv => conv.id !== selectedItem.id);
+      return currentConv ? [currentConv, ...otherConvs] : updatedList;
     };
 
-    // 注册消息处理器
-    const unregister = registerMessageHandler(handleGlobalMessage);
+    setConversations(updateAndMoveToTop);
+    setFilteredConversations(updateAndMoveToTop);
+  }, [selectedItem]);
 
-    // 清理函数
-    return () => {
-      unregister();
-    };
-  }, [registerMessageHandler]);
+  // 处理录音按钮点击
+  const handleVoiceButtonClick = () => {
+    if (isRecording) {
+      // 正在录音，停止录音
+      stopRecording();
+    } else {
+      // 开始录音
+      startRecording();
+    }
+  };
 
   // 实时搜索会话 - 监听搜索值变化
   useEffect(() => {
@@ -332,7 +371,7 @@ const MainPage = () => {
   }, [conversations, conversationSearchValue]);
 
   // 加载群成员（用于九宫格头像）
-  const loadGroupMembers = async (groupId) => {
+  const loadGroupMembers = useCallback(async (groupId) => {
     // 如果已缓存，直接返回
     if (groupMembersCache[groupId]) {
       return groupMembersCache[groupId];
@@ -352,14 +391,26 @@ const MainPage = () => {
       console.error('加载群成员失败:', error);
     }
     return [];
-  };
+  }, [groupMembersCache]);
 
-  const loadConversations = async () => {
+  const loadConversations = useCallback(async () => {
+    // 记录请求开始时间，用于检测乐观更新冲突
+    const requestStartTime = Date.now();
+
     try {
       const response = await conversationAPI.getConversations();
       const data = Array.isArray(response.data) ? response.data : [];
       // 过滤掉null值，确保数组元素都是有效对象
       const validConversations = data.filter(item => item && typeof item === 'object');
+
+      // 检查在请求期间是否发生了乐观更新
+      // 如果乐观更新发生在请求开始之后，说明用户刚发送了消息
+      // 此时服务器返回的数据可能是旧的，需要跳过这次更新
+      if (lastOptimisticUpdateRef.current > requestStartTime) {
+        console.log('[loadConversations] 跳过更新：乐观更新时间更新，避免覆盖本地状态');
+        return;
+      }
+
       setConversations(validConversations);
 
       // 预加载群聊成员信息（用于九宫格头像）
@@ -372,9 +423,9 @@ const MainPage = () => {
       console.error('加载会话失败:', error);
       setConversations([]); // 失败时设置为空数组
     }
-  };
+  }, [loadGroupMembers]); // 添加 loadGroupMembers 到依赖数组
 
-  const loadFriends = async () => {
+  const loadFriends = useCallback(async () => {
     try {
       const response = await friendAPI.getFriends();
       const data = Array.isArray(response.data) ? response.data : [];
@@ -386,7 +437,86 @@ const MainPage = () => {
       setFriends([]); // 失败时设置为空数组
       message.error('加载好友失败');
     }
-  };
+  }, []); // 空依赖数组，因为函数内部没有使用任何props或state
+
+  // 加载好友申请数量
+  const loadFriendRequestCount = useCallback(async () => {
+    try {
+      const response = await friendRequestAPI.getPendingCount();
+      if (response?.data) {
+        setFriendRequestCount(response.data.count || 0);
+      }
+    } catch (error) {
+      console.error('加载好友申请数量失败:', error);
+    }
+  }, []);
+
+  // 加载数据
+  useEffect(() => {
+    if (activeNav === 'conversations') {
+      loadConversations();
+    } else if (activeNav === 'friends') {
+      loadFriends();
+      loadFriendRequestCount(); // 切换到好友页面时加载申请数量
+    }
+  }, [activeNav, loadConversations, loadFriends, loadFriendRequestCount]);
+
+  // 初始化时也加载申请数量（用于显示红点）
+  useEffect(() => {
+    loadFriendRequestCount();
+  }, [loadFriendRequestCount]);
+
+  // 注册WebSocket消息处理器，用于实时更新会话列表和好友申请
+  useEffect(() => {
+    if (!registerMessageHandler) return;
+
+    const handleGlobalMessage = (type, data) => {
+      // 处理聊天消息 - 更新会话列表
+      if (type === 'message') {
+        // 收到新消息时刷新会话列表
+        loadConversations();
+      }
+
+      // 处理消息撤回通知 - 更新会话列表
+      if (type === 'recall-notify') {
+        // 撤回消息后刷新会话列表，让后端返回正确的撤回状态
+        loadConversations();
+      }
+
+      // 处理好友申请相关消息
+      if (type === 'friend-request') {
+        const action = data?.action || data?.type;
+        switch (action) {
+          case 'new_request':
+            // 收到新好友申请
+            setFriendRequestCount(prev => prev + 1);
+            message.info(`收到来自 ${data.data?.from_user?.nickname || '某人'} 的好友申请`);
+            // 如果好友申请面板已打开，刷新列表
+            if (window.__friendRequestPanelRefresh) {
+              window.__friendRequestPanelRefresh();
+            }
+            break;
+          case 'request_accepted':
+            // 好友申请被接受
+            message.success(`${data.data?.friend?.nickname || '对方'} 已接受你的好友申请`);
+            loadFriends();
+            loadConversations();
+            break;
+          case 'request_rejected':
+            // 好友申请被拒绝
+            message.info('你的好友申请被拒绝');
+            break;
+          default:
+            break;
+        }
+      }
+    };
+
+    const unregister = registerMessageHandler(handleGlobalMessage);
+    return () => {
+      if (unregister) unregister();
+    };
+  }, [registerMessageHandler, loadConversations, loadFriends]);
 
   const handleLogout = async () => {
     await logout();
@@ -453,11 +583,6 @@ const MainPage = () => {
     setSelectedItem(conversation);
     setRightPanelVisible(true);
 
-    // 如果选择的是群聊，重新显示群成员侧边栏
-    if (conversation.type === 2) {
-      setGroupMembersSidebarVisible(true);
-    }
-
     // 自动清除未读消息
     if (conversation.unread_count > 0) {
       await clearUnreadCount(conversation.id);
@@ -492,8 +617,8 @@ const MainPage = () => {
     }
   };
 
-  // 从Modal中添加好友
-  const handleAddFriendFromModal = async (searchUser) => {
+  // 从Modal中添加好友 - 打开确认弹窗
+  const handleAddFriendFromModal = (searchUser) => {
     // 检查是否是自己
     if (searchUser.id === user?.id) {
       message.info('不能添加自己为好友');
@@ -507,22 +632,76 @@ const MainPage = () => {
       return;
     }
 
+    // 打开发送申请确认弹窗
+    setSendRequestTarget(searchUser);
+    setSendRequestMessage('');
+    setSendRequestModalVisible(true);
+  };
+
+  // 确认发送好友申请
+  const handleConfirmSendRequest = async () => {
+    if (!sendRequestTarget) return;
+
+    setSendingRequest(true);
+    try {
+      // 使用好友申请API发送申请
+      const response = await friendRequestAPI.sendRequest(sendRequestTarget.id, sendRequestMessage);
+      message.success(`已发送好友申请给 ${sendRequestTarget.nickname}`);
+
+      // 更新搜索结果中该用户的状态为"已发送"
+      setSearchResults(prev => prev.map(item =>
+        item.id === sendRequestTarget.id
+          ? { ...item, processing: false, request_status: 'sent', request_id: response?.data?.request_id || 0 }
+          : item
+      ));
+
+      // 关闭弹窗
+      setSendRequestModalVisible(false);
+      setSendRequestTarget(null);
+      setSendRequestMessage('');
+    } catch (error) {
+      const errorMsg = error?.message || error?.error || '发送申请失败';
+      message.error(errorMsg);
+    } finally {
+      setSendingRequest(false);
+    }
+  };
+
+  // 取消发送好友申请
+  const handleCancelSendRequest = () => {
+    setSendRequestModalVisible(false);
+    setSendRequestTarget(null);
+    setSendRequestMessage('');
+  };
+
+  // 从搜索结果中同意好友申请
+  const handleAcceptRequestFromSearch = async (searchUser) => {
+    if (!searchUser.request_id) {
+      message.error('申请信息不完整');
+      return;
+    }
+
     try {
       // 标记正在处理
       setSearchResults(prev => prev.map(item =>
         item.id === searchUser.id ? { ...item, processing: true } : item
       ));
 
-      await friendAPI.addFriend(searchUser.id);
-      message.success(`已发送好友请求给 ${searchUser.nickname}`);
+      await friendRequestAPI.acceptRequest(searchUser.request_id);
+      message.success(`已同意 ${searchUser.nickname} 的好友申请`);
 
-      // 从搜索结果中移除
-      setSearchResults(prev => prev.filter(item => item.id !== searchUser.id));
+      // 更新搜索结果中该用户的状态为"已是好友"
+      setSearchResults(prev => prev.map(item =>
+        item.id === searchUser.id
+          ? { ...item, processing: false, is_friend: true, request_status: 'none' }
+          : item
+      ));
 
       // 重新加载好友列表
       loadFriends();
     } catch (error) {
-      message.error(error.response?.data?.message || '添加好友失败');
+      const errorMsg = error?.message || error?.error || '同意申请失败';
+      message.error(errorMsg);
       // 恢复处理状态
       setSearchResults(prev => prev.map(item =>
         item.id === searchUser.id ? { ...item, processing: false } : item
@@ -664,32 +843,28 @@ const MainPage = () => {
       const msgId = wsClient.sendChatMessage(selectedItem.target_id, imageUrl, 2, selectedItem.type); // msg_type=2表示图片，传递会话类型
 
       if (msgId) {
-        // 不显示成功提示，图片发送是静默的
-        // message.success('图片发送成功');
+        // 记录乐观更新时间，防止 loadConversations 覆盖
+        lastOptimisticUpdateRef.current = Date.now();
 
-        // 更新会话列表（显示[图片]）
-        setConversations(prev =>
-          prev.map(conv =>
+        // 更新会话列表并置顶
+        const now = new Date().toISOString();
+        const updateAndMoveToTop = (prev) => {
+          const updatedList = prev.map(conv =>
             conv.id === selectedItem.id
               ? {
                   ...conv,
                   last_msg_content: '[图片]',
-                  last_msg_time: new Date().toISOString(),
+                  last_msg_time: now,
+                  last_msg_type: 2,
                 }
               : conv
-          )
-        );
-        setFilteredConversations(prev =>
-          prev.map(conv =>
-            conv.id === selectedItem.id
-              ? {
-                  ...conv,
-                  last_msg_content: '[图片]',
-                  last_msg_time: new Date().toISOString(),
-                }
-              : conv
-          )
-        );
+          );
+          const currentConv = updatedList.find(conv => conv.id === selectedItem.id);
+          const otherConvs = updatedList.filter(conv => conv.id !== selectedItem.id);
+          return currentConv ? [currentConv, ...otherConvs] : updatedList;
+        };
+        setConversations(updateAndMoveToTop);
+        setFilteredConversations(updateAndMoveToTop);
 
         // 通过 ref 触发 ChatInterface 更新
         // 这样图片会立即显示在聊天界面中
@@ -726,7 +901,6 @@ const MainPage = () => {
     };
     setSelectedItem(newConversation);
     setRightPanelVisible(true);
-    setGroupMembersSidebarVisible(true); // 显示群成员侧边栏
   };
 
   const renderMainContent = () => {
@@ -953,6 +1127,42 @@ const MainPage = () => {
               </div>
             </div>
 
+            {/* 好友申请入口 */}
+            <div
+              style={{
+                padding: '6px 20px',
+                cursor: 'pointer',
+                background: '#fff',
+                borderBottom: '1px solid #f0f0f0',
+                transition: 'background 0.2s',
+                display: 'flex',
+                alignItems: 'center',
+              }}
+              onClick={() => setFriendRequestPanelVisible(true)}
+            >
+              <div style={{ marginRight: '12px' }}>
+                <Badge count={friendRequestCount} size="small" offset={[-5, 5]}>
+                  <Avatar
+                    size={48}
+                    icon={<BellOutlined />}
+                    style={{
+                      backgroundColor: '#fa8c16',
+                    }}
+                  />
+                </Badge>
+              </div>
+              <div style={{ flex: 1 }}>
+                <Text strong style={{ fontSize: '14px' }}>
+                  好友申请
+                </Text>
+                {friendRequestCount > 0 && (
+                  <Text type="secondary" style={{ fontSize: '12px', marginLeft: 8 }}>
+                    {friendRequestCount}条待处理
+                  </Text>
+                )}
+              </div>
+            </div>
+
             {/* 好友列表头部信息 */}
             <div style={{ padding: '12px 20px', borderBottom: '1px solid #e8e8e8', fontSize: '12px', color: '#666' }}>
               我的好友 ({friends.length})
@@ -1165,31 +1375,7 @@ const MainPage = () => {
                   currentUser={user}
                   inputValue={getInputValue(selectedItem.id)}
                   setInputValue={(value) => setInputValue(selectedItem.id, value)}
-                  onSendMessage={(content) => {
-                    // 发送消息后更新会话列表
-                    setConversations(prev =>
-                      prev.map(conv =>
-                        conv.id === selectedItem.id
-                          ? {
-                              ...conv,
-                              last_msg_content: content,
-                              last_msg_time: new Date().toISOString(),
-                            }
-                          : conv
-                      )
-                    );
-                    setFilteredConversations(prev =>
-                      prev.map(conv =>
-                        conv.id === selectedItem.id
-                          ? {
-                              ...conv,
-                              last_msg_content: content,
-                              last_msg_time: new Date().toISOString(),
-                            }
-                          : conv
-                      )
-                    );
-                  }}
+                  onSendMessage={handleMessageSent}
                   onClearUnread={() => clearUnreadCount(selectedItem.id)}
                 />
               </div>
@@ -1199,7 +1385,7 @@ const MainPage = () => {
                 background: '#fff',
                 borderTop: '1px solid #e5e7eb',
                 padding: '16px',
-                flexShrink: 0, // 防止被压缩
+                flexShrink: 0,
               }}>
                 {/* 隐藏的图片上传input */}
                 <input
@@ -1210,113 +1396,241 @@ const MainPage = () => {
                   onChange={handleImageSelect}
                 />
 
-                {/* 简化的输入框样式 - 普通文本输入 */}
+                {/* 输入框容器 - 保持固定高度，录音时原地替换内容 */}
                 <div style={{
                   background: '#fff',
                   border: '1px solid #e5e7eb',
                   borderRadius: '20px',
                   padding: '8px 16px',
-                  minHeight: '44px',
+                  minHeight: '120px',
                   position: 'relative',
+                  transition: 'border-color 0.2s',
+                  borderColor: isRecording ? '#ff4d4f' : '#e5e7eb',
                 }}>
-                  {/* 第一行：功能按钮栏 */}
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    marginBottom: '6px',
-                  }}>
+                  {isRecording ? (
+                    /* 录音状态UI - 原地替换 */
                     <div style={{
                       display: 'flex',
-                      gap: '16px',
-                      color: '#666',
-                      fontSize: '16px',
+                      flexDirection: 'column',
+                      height: '100%',
+                      minHeight: '104px',
                     }}>
-                      <EmojiPicker
-                        onSelect={(emoji) => {
-                          // 在光标位置插入表情
-                          const currentValue = getInputValue(selectedItem.id);
-                          setInputValue(selectedItem.id, currentValue + emoji);
-                        }}
-                      >
-                        <SmileOutlined
-                          title="表情"
+                      {/* 顶部工具栏 */}
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        marginBottom: '12px',
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                        }}>
+                          <div style={{
+                            width: '8px',
+                            height: '8px',
+                            backgroundColor: '#ff4d4f',
+                            borderRadius: '50%',
+                            animation: 'blink 1s ease-in-out infinite',
+                          }} />
+                          <span style={{
+                            fontSize: '14px',
+                            fontWeight: '500',
+                            color: '#ff4d4f',
+                            fontVariantNumeric: 'tabular-nums',
+                          }}>
+                            {formatDuration(recordingDuration)}
+                          </span>
+                          <span style={{ fontSize: '12px', color: '#999', marginLeft: '8px' }}>
+                            录音中...
+                          </span>
+                        </div>
+                        <CloseOutlined
                           style={{
+                            fontSize: '14px',
+                            color: '#999',
                             cursor: 'pointer',
-                            fontSize: '18px',
+                            padding: '4px',
+                          }}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            cancelRecording();
+                          }}
+                          title="取消录音"
+                        />
+                      </div>
+
+                      {/* 中间波形动画区域 */}
+                      <div style={{
+                        flex: 1,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '3px',
+                        minHeight: '40px',
+                      }}>
+                        {[...Array(20)].map((_, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              width: '3px',
+                              backgroundColor: '#ff4d4f',
+                              borderRadius: '2px',
+                              animation: `voiceWave 0.5s ease-in-out infinite`,
+                              animationDelay: `${i * 0.05}s`,
+                              height: '8px',
+                            }}
+                          />
+                        ))}
+                      </div>
+
+                      {/* 底部发送按钮 */}
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'flex-end',
+                        marginTop: '12px',
+                      }}>
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '6px 16px',
+                            backgroundColor: isValidDuration() ? '#1890ff' : '#d9d9d9',
+                            color: '#fff',
+                            borderRadius: '16px',
+                            cursor: isValidDuration() ? 'pointer' : 'not-allowed',
+                            fontSize: '14px',
+                            fontWeight: '500',
                             transition: 'all 0.2s',
                           }}
-                          onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
-                          onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
-                        />
-                      </EmojiPicker>
-                      {uploading ? (
-                        <LoadingOutlined title="上传中..." style={{ cursor: 'not-allowed', fontSize: '18px', color: '#999' }} />
-                      ) : (
-                        <PictureOutlined
-                          title="图片"
-                          style={{ cursor: 'pointer', fontSize: '18px', transition: 'all 0.2s' }}
-                          onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
-                          onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
-                          onClick={() => imageInputRef.current?.click()}
-                        />
-                      )}
-                      <AudioOutlined title="语音" style={{ cursor: 'pointer', opacity: 0.6 }} />
+                          onClick={(e) => {
+                            e.preventDefault();
+                            if (isValidDuration()) {
+                              stopRecording();
+                            }
+                          }}
+                        >
+                          <AudioOutlined style={{ fontSize: '14px' }} />
+                          发送语音
+                        </div>
+                      </div>
                     </div>
+                  ) : (
+                    /* 普通输入状态 */
+                    <>
+                      {/* 第一行：功能按钮栏 */}
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        marginBottom: '6px',
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          gap: '16px',
+                          color: '#666',
+                          fontSize: '16px',
+                        }}>
+                          <EmojiPicker
+                            onSelect={(emoji) => {
+                              const currentValue = getInputValue(selectedItem.id);
+                              setInputValue(selectedItem.id, currentValue + emoji);
+                            }}
+                          >
+                            <SmileOutlined
+                              title="表情"
+                              style={{
+                                cursor: 'pointer',
+                                fontSize: '18px',
+                                transition: 'all 0.2s',
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
+                              onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
+                            />
+                          </EmojiPicker>
+                          {uploading ? (
+                            <LoadingOutlined title="上传中..." style={{ cursor: 'not-allowed', fontSize: '18px', color: '#999' }} />
+                          ) : (
+                            <PictureOutlined
+                              title="图片"
+                              style={{ cursor: 'pointer', fontSize: '18px', transition: 'all 0.2s' }}
+                              onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
+                              onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
+                              onClick={() => imageInputRef.current?.click()}
+                            />
+                          )}
+                          {voiceUploading ? (
+                            <LoadingOutlined title="发送中..." style={{ cursor: 'not-allowed', fontSize: '18px', color: '#999' }} />
+                          ) : (
+                            <AudioOutlined
+                              title="语音"
+                              style={{
+                                cursor: 'pointer',
+                                fontSize: '18px',
+                                transition: 'all 0.2s',
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
+                              onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
+                              onClick={handleVoiceButtonClick}
+                            />
+                          )}
+                        </div>
 
-                    {/* 右下角发送文字 - 根据输入状态改变颜色，修复点击问题 */}
-                    <div
-                      style={{
-                        position: 'absolute',
-                        bottom: '8px',
-                        right: '16px',
-                        color: getInputValue(selectedItem.id).trim() ? '#1890ff' : '#ccc', // 有内容时蓝色，无内容时灰色
-                        fontSize: '14px',
-                        fontWeight: '500',
-                        cursor: getInputValue(selectedItem.id).trim() ? 'pointer' : 'not-allowed', // 有内容时可点击
-                        userSelect: 'none',
-                        zIndex: 10, // 确保在最上层
-                        pointerEvents: getInputValue(selectedItem.id).trim() ? 'auto' : 'none', // 有内容时可点击，无内容时不可点击
-                      }}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (getInputValue(selectedItem.id).trim() && chatInterfaceRef.current?.handleSendMessage) {
-                          // 直接调用ChatInterface暴露的发送消息方法
-                          chatInterfaceRef.current.handleSendMessage();
-                        }
-                      }}
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                      }}
-                    >
-                      发送(S)
-                    </div>
-                  </div>
+                        {/* 右下角发送文字 */}
+                        <div
+                          style={{
+                            position: 'absolute',
+                            bottom: '8px',
+                            right: '16px',
+                            color: getInputValue(selectedItem.id).trim() ? '#1890ff' : '#ccc',
+                            fontSize: '14px',
+                            fontWeight: '500',
+                            cursor: getInputValue(selectedItem.id).trim() ? 'pointer' : 'not-allowed',
+                            userSelect: 'none',
+                            zIndex: 10,
+                            pointerEvents: getInputValue(selectedItem.id).trim() ? 'auto' : 'none',
+                          }}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (getInputValue(selectedItem.id).trim() && chatInterfaceRef.current?.handleSendMessage) {
+                              chatInterfaceRef.current.handleSendMessage();
+                            }
+                          }}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                          }}
+                        >
+                          发送(S)
+                        </div>
+                      </div>
 
-                  {/* 第二行：输入区域 - 扩展到三行空白 */}
-                  <TextArea
-                    value={getInputValue(selectedItem.id)}
-                    onChange={(e) => setInputValue(selectedItem.id, e.target.value)}
-                    placeholder="输入消息..."
-                    autoSize={{ minRows: 3, maxRows: 6 }} // 减少到3行空白，支持最多6行
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        // 这个逻辑会在ChatInterface中处理
-                      }
-                    }}
-                    style={{
-                      resize: 'none',
-                      border: 'none',
-                      padding: '0',
-                      lineHeight: '1.6', // 稍微增加行高，填充视觉空白
-                      fontSize: '15px',
-                      background: 'transparent',
-                      outline: 'none',
-                      boxShadow: 'none',
-                    }}
-                  />
+                      {/* 第二行：输入区域 */}
+                      <TextArea
+                        value={getInputValue(selectedItem.id)}
+                        onChange={(e) => setInputValue(selectedItem.id, e.target.value)}
+                        placeholder="输入消息..."
+                        autoSize={{ minRows: 3, maxRows: 6 }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                          }
+                        }}
+                        style={{
+                          resize: 'none',
+                          border: 'none',
+                          padding: '0',
+                          lineHeight: '1.6',
+                          fontSize: '15px',
+                          background: 'transparent',
+                          outline: 'none',
+                          boxShadow: 'none',
+                        }}
+                      />
+                    </>
+                  )}
                 </div>
               </div>
             </>
@@ -1678,8 +1992,100 @@ const MainPage = () => {
                 renderItem={(searchUser) => {
                   // 检查是否是自己
                   const isSelf = searchUser.id === user?.id;
-                  // 检查是否已经是好友
-                  const isFriend = friends.some(friend => friend.id === searchUser.id);
+                  // 优先使用API返回的is_friend，其次使用本地好友列表检查
+                  const isFriend = searchUser.is_friend || friends.some(friend => friend.id === searchUser.id);
+                  // 获取申请状态
+                  const requestStatus = searchUser.request_status || 'none';
+
+                  // 根据状态渲染不同的按钮
+                  const renderActionButton = () => {
+                    if (isSelf) {
+                      return <Tag color="blue">自己</Tag>;
+                    }
+                    if (isFriend) {
+                      return <Tag color="green">已是好友</Tag>;
+                    }
+                    if (requestStatus === 'sent') {
+                      return <Tag color="orange">已发送申请</Tag>;
+                    }
+                    if (requestStatus === 'received') {
+                      return (
+                        <Button
+                          type="primary"
+                          size="small"
+                          disabled={searchUser.processing}
+                          onClick={() => handleAcceptRequestFromSearch(searchUser)}
+                          style={{
+                            minWidth: '80px',
+                            width: '80px',
+                            height: '28px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            backgroundColor: '#52c41a',
+                            borderColor: '#52c41a'
+                          }}
+                        >
+                          {searchUser.processing ? '处理中' : '同意申请'}
+                        </Button>
+                      );
+                    }
+                    // 默认：可以添加好友
+                    return (
+                      <Button
+                        type="primary"
+                        size="small"
+                        disabled={searchUser.processing}
+                        onClick={() => handleAddFriendFromModal(searchUser)}
+                        style={{
+                          minWidth: '80px',
+                          width: '80px',
+                          height: '28px',
+                          display: 'flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          transition: 'all 0.2s ease',
+                          overflow: 'hidden',
+                          whiteSpace: 'nowrap',
+                          position: 'relative'
+                        }}
+                      >
+                        {searchUser.processing ? (
+                          <span style={{
+                            fontSize: '12px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: '100%'
+                          }}>
+                            <span
+                              className="loading-spinner"
+                              style={{
+                                width: '12px',
+                                height: '12px',
+                                border: '2px solid #ffffff',
+                                borderTop: '2px solid transparent',
+                                borderRadius: '50%',
+                                marginRight: '4px',
+                                animation: 'spin 1s linear infinite'
+                              }}
+                            />
+                            处理中
+                          </span>
+                        ) : (
+                          <span style={{
+                            fontSize: '12px',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            width: '100%'
+                          }}>
+                            添加好友
+                          </span>
+                        )}
+                      </Button>
+                    );
+                  };
 
                   return (
                     <List.Item
@@ -1689,66 +2095,7 @@ const MainPage = () => {
                         borderRadius: '4px',
                         padding: '12px 16px'
                       }}
-                      actions={[
-                        isSelf ? (
-                          <Tag color="blue">自己</Tag>
-                        ) : isFriend ? (
-                          <Tag color="green">已是好友</Tag>
-                        ) : (
-                          <Button
-                            type="primary"
-                            size="small"
-                            disabled={searchUser.processing}
-                            onClick={() => handleAddFriendFromModal(searchUser)}
-                            style={{
-                              minWidth: '80px', // 固定最小宽度，避免宽度变化
-                              width: '80px', // 固定宽度
-                              height: '28px', // 固定高度
-                              display: 'flex',
-                              alignItems: 'center',
-                              justifyContent: 'center',
-                              transition: 'all 0.2s ease', // 缩短过渡时间，更快响应
-                              overflow: 'hidden', // 防止文本溢出
-                              whiteSpace: 'nowrap', // 防止文本换行
-                              position: 'relative' // 为loading图标定位
-                            }}
-                          >
-                            {searchUser.processing ? (
-                              <span style={{
-                                fontSize: '12px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                width: '100%'
-                              }}>
-                                <span
-                                  className="loading-spinner"
-                                  style={{
-                                    width: '12px',
-                                    height: '12px',
-                                    border: '2px solid #ffffff',
-                                    borderTop: '2px solid transparent',
-                                    borderRadius: '50%',
-                                    marginRight: '4px',
-                                    animation: 'spin 1s linear infinite'
-                                  }}
-                                />
-                                处理中
-                              </span>
-                            ) : (
-                              <span style={{
-                                fontSize: '12px',
-                                display: 'flex',
-                                alignItems: 'center',
-                                justifyContent: 'center',
-                                width: '100%'
-                              }}>
-                                添加好友
-                              </span>
-                            )}
-                          </Button>
-                        )
-                      ]}
+                      actions={[renderActionButton()]}
                     >
                       <List.Item.Meta
                         avatar={
@@ -1782,6 +2129,64 @@ const MainPage = () => {
               />
             </div>
           </div>
+        </Modal>
+
+        {/* 发送好友申请确认弹窗 */}
+        <Modal
+          title="发送好友申请"
+          open={sendRequestModalVisible}
+          onCancel={handleCancelSendRequest}
+          onOk={handleConfirmSendRequest}
+          okText="发送申请"
+          cancelText="取消"
+          confirmLoading={sendingRequest}
+          width={400}
+          destroyOnClose
+        >
+          {sendRequestTarget && (
+            <div>
+              {/* 目标用户信息 */}
+              <div style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '12px',
+                padding: '12px',
+                background: '#f5f5f5',
+                borderRadius: '8px',
+                marginBottom: '16px',
+              }}>
+                <Avatar
+                  size={48}
+                  src={getAvatarSrc(sendRequestTarget.avatar)}
+                  icon={<UserOutlined />}
+                >
+                  {sendRequestTarget.nickname?.[0]}
+                </Avatar>
+                <div>
+                  <Text strong style={{ fontSize: '15px', display: 'block' }}>
+                    {sendRequestTarget.nickname}
+                  </Text>
+                  <Text type="secondary" style={{ fontSize: '12px' }}>
+                    {sendRequestTarget.phone || ''}
+                  </Text>
+                </div>
+              </div>
+
+              {/* 申请说明输入框 */}
+              <div style={{ paddingBottom: '24px' }}>
+                <Text style={{ fontSize: '13px', color: '#666', marginBottom: '8px', display: 'block' }}>
+                  添加申请说明（选填）
+                </Text>
+                <Input
+                  value={sendRequestMessage}
+                  onChange={(e) => setSendRequestMessage(e.target.value)}
+                  placeholder="如：我是xxx"
+                  maxLength={20}
+                  showCount
+                />
+              </div>
+            </div>
+          )}
         </Modal>
 
         {/* 个人信息编辑弹窗 */}
@@ -1825,6 +2230,17 @@ const MainPage = () => {
           onClose={handleGroupMembersSidebarClose}
         />
       )}
+
+      {/* 好友申请面板 */}
+      <FriendRequestPanel
+        visible={friendRequestPanelVisible}
+        onClose={() => setFriendRequestPanelVisible(false)}
+        onAccept={() => {
+          loadFriends();
+          loadFriendRequestCount();
+        }}
+        onCountChange={(count) => setFriendRequestCount(count)}
+      />
     </div>
   );
 };

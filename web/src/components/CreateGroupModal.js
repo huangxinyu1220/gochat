@@ -3,6 +3,7 @@ import { Modal, Steps, Checkbox, Input, Button, Avatar, List, message } from 'an
 import { UserOutlined } from '@ant-design/icons';
 import { friendAPI, groupAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { getAvatarSrc } from '../utils/avatar';
 
 const CreateGroupModal = ({ visible, onCancel, onSuccess }) => {
   const { user } = useAuth(); // 获取当前登录用户
@@ -11,16 +12,6 @@ const CreateGroupModal = ({ visible, onCancel, onSuccess }) => {
   const [groupName, setGroupName] = useState('');
   const [friends, setFriends] = useState([]);
   const [loading, setLoading] = useState(false);
-
-  // 获取头像URL
-  const getAvatarSrc = (avatar) => {
-    if (!avatar) {
-      return null;
-    }
-
-    const baseURL = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
-    return `${baseURL}/uploads/files/${avatar}`;
-  };
 
   // 加载好友列表
   useEffect(() => {
