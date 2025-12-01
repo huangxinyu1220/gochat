@@ -3,6 +3,7 @@ import { List, Avatar, Card, Typography, Badge, Space, Button, message } from 'a
 import { WechatOutlined, TeamOutlined, ClearOutlined } from '@ant-design/icons';
 import { conversationAPI } from '../services/api';
 import { useAuth } from '../context/AuthContext';
+import { getAvatarSrc } from '../utils/avatar';
 
 const { Title, Text } = Typography;
 
@@ -10,16 +11,6 @@ const ConversationsPage = () => {
   const { user } = useAuth();
   const [conversations, setConversations] = useState([]);
   const [loading, setLoading] = useState(true);
-
-  // 获取头像URL - 统一使用uploads/files目录
-  const getAvatarSrc = (avatar) => {
-    if (!avatar || avatar === 'default.png') {
-      return null;
-    }
-
-    const baseURL = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
-    return `${baseURL}/uploads/files/${avatar}`;
-  };
 
   // 加载会话列表
   const loadConversations = async () => {

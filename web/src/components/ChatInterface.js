@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useCallback, useImperativeHandle, f
 import { Spin, App, Image } from 'antd';
 import { messageAPI } from '../services/api';
 import { useWebSocket } from '../context/WebSocketContext';
+import { getBaseUrl } from '../config';
+import VoiceMessage from './VoiceMessage';
 
 const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setInputValue, onSendMessage, onClearUnread }, ref) => {
   const { message } = App.useApp(); // 使用 App.useApp() 获取 message 实例
@@ -569,11 +571,11 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
 
   // 渲染消息内容
   const renderMessageContent = (msg) => {
-    const { content, msg_type } = msg;
+    const { content, msg_type, isSelf } = msg;
 
     // 图片消息
     if (msg_type === 2) {
-      const imageUrl = `${process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080'}${content}`;
+      const imageUrl = `${getBaseUrl()}${content}`;
       return (
         <Image
           src={imageUrl}
@@ -587,6 +589,27 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
           preview={{
             mask: <div style={{ fontSize: '14px' }}>点击查看大图</div>,
           }}
+        />
+      );
+    }
+
+    // 语音消息
+    if (msg_type === 3) {
+      // 解析语音内容（格式：url|duration）
+      let voiceUrl = content;
+      let duration = 0;
+
+      if (content.includes('|')) {
+        const [url, dur] = content.split('|');
+        voiceUrl = url;
+        duration = parseFloat(dur) || 0;
+      }
+
+      return (
+        <VoiceMessage
+          src={voiceUrl}
+          duration={duration}
+          isSelf={isSelf}
         />
       );
     }
@@ -823,13 +846,14 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
                     <div
                       style={{
                         maxWidth: '70%',
-                        background: msg.isSelf ? '#95ec69' : '#fff',
+                        // 语音消息使用自己的样式，不需要气泡背景
+                        background: msg.msg_type === 3 ? 'transparent' : (msg.isSelf ? '#95ec69' : '#fff'),
                         color: '#333',
-                        padding: '8px 12px',
+                        padding: msg.msg_type === 3 ? '0' : '8px 12px',
                         borderRadius: '6px',
                         position: 'relative',
-                        boxShadow: '0 1px 3px rgba(0, 0, 0, 0.1)',
-                        border: msg.isSelf ? 'none' : '1px solid #e5e7eb',
+                        boxShadow: msg.msg_type === 3 ? 'none' : '0 1px 3px rgba(0, 0, 0, 0.1)',
+                        border: msg.msg_type === 3 ? 'none' : (msg.isSelf ? 'none' : '1px solid #e5e7eb'),
                         wordBreak: 'break-word',
                       }}
                     >
@@ -847,8 +871,8 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
                         {renderMessageContent(msg)}
                       </div>
 
-                      {/* 优化的气泡尾巴 - 双方都有三角尖 */}
-                      {msg.isSelf ? (
+                      {/* 优化的气泡尾巴 - 双方都有三角尖，语音消息不显示 */}
+                      {msg.msg_type !== 3 && (msg.isSelf ? (
                         // 自己的消息：右侧绿色三角尖 - 调整位置到气泡中央
                         <div style={{
                           position: 'absolute',
@@ -889,7 +913,7 @@ const ChatInterface = forwardRef(({ conversation, currentUser, inputValue, setIn
                             borderBottom: '4px solid transparent',
                           }} />
                         </>
-                      )}
+                      ))}
                     </div>
                   </div>
                 </div>

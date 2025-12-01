@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import { Modal, Avatar, List, Button, message, Checkbox } from 'antd';
 import { UserOutlined, CrownOutlined, TeamOutlined } from '@ant-design/icons';
 import { groupAPI, friendAPI } from '../services/api';
+import { getAvatarSrc } from '../utils/avatar';
 
 const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberInitially = false }) => {
   const [groupInfo, setGroupInfo] = useState(null);
@@ -11,16 +12,6 @@ const GroupDetailModal = ({ visible, groupId, onCancel, onUpdate, showAddMemberI
   const [friends, setFriends] = useState([]);
   const [selectedFriends, setSelectedFriends] = useState([]);
   const [addingMembers, setAddingMembers] = useState(false);
-
-  // 获取头像URL - 统一使用uploads/files目录
-  const getAvatarSrc = (avatar) => {
-    if (!avatar || avatar === 'default.png') {
-      return null;
-    }
-
-    const baseURL = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
-    return `${baseURL}/uploads/files/${avatar}`;
-  };
 
   useEffect(() => {
     if (visible && groupId) {

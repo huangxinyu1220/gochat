@@ -1,3 +1,5 @@
+import { getBaseUrl } from '../config';
+
 // 头像缓存版本号，全局管理
 let avatarCacheVersion = Date.now();
 
@@ -15,7 +17,7 @@ export const updateAvatarCacheVersion = () => {
  */
 export const getAvatarSrc = (avatar) => {
   if (avatar && avatar !== 'default.png') {
-    const baseUrl = process.env.REACT_APP_API_BASE_URL?.replace('/api/v1', '') || 'http://localhost:8080';
+    const baseUrl = getBaseUrl();
 
     // 如果是新格式（完整路径），直接使用
     if (avatar.startsWith('uploads/')) {

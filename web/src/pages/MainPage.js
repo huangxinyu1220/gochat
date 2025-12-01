@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import { Avatar, Typography, Button, List, Badge, message, Input, Modal, Tag, Card, Divider, Row, Col, App, Dropdown } from 'antd';
 import { LogoutOutlined, UserOutlined, TeamOutlined, WechatOutlined, CloseOutlined, DeleteOutlined, SearchOutlined, UserAddOutlined, SmileOutlined, PictureOutlined, AudioOutlined, LoadingOutlined, PlusOutlined } from '@ant-design/icons';
 import { useAuth } from '../context/AuthContext';
@@ -13,6 +13,7 @@ import GroupMembersSidebar from '../components/GroupMembersSidebar';
 import GroupDetailModal from '../components/GroupDetailModal';
 import { getNameInitial } from '../utils/chinesePinyin';
 import { getAvatarSrc, updateAvatarCacheVersion } from '../utils/avatar';
+import { useAudioRecorder } from '../hooks/useAudioRecorder';
 
 // 企业微信风格布局的IM界面
 const MainPage = () => {
@@ -26,6 +27,14 @@ const MainPage = () => {
       @keyframes spin {
         0% { transform: rotate(0deg); }
         100% { transform: rotate(360deg); }
+      }
+      @keyframes blink {
+        0%, 100% { opacity: 1; }
+        50% { opacity: 0.3; }
+      }
+      @keyframes voiceWave {
+        0%, 100% { height: 8px; }
+        50% { height: 24px; }
       }
     `;
     document.head.appendChild(style);
@@ -124,6 +133,11 @@ const MainPage = () => {
       return '[图片]';
     }
 
+    // 如果是语音消息，显示 [语音]
+    if (msgType === 3) {
+      return '[语音]';
+    }
+
     // 文本消息直接显示
     return content;
   };
@@ -157,7 +171,7 @@ const MainPage = () => {
   const [showAddMemberInitially, setShowAddMemberInitially] = useState(false);
 
   // 群成员侧边栏显示状态
-  const [groupMembersSidebarVisible, setGroupMembersSidebarVisible] = useState(true);
+  const [groupMembersSidebarVisible, setGroupMembersSidebarVisible] = useState(false);
 
   // 群成员缓存（用于九宫格头像）
   const [groupMembersCache, setGroupMembersCache] = useState({});
@@ -196,14 +210,129 @@ const MainPage = () => {
   const imageInputRef = React.useRef(null);
   const chatInterfaceRef = React.useRef(null);
 
-  // 加载数据
+  // 语音录制相关 - 使用 useAudioRecorder hook
+  const {
+    isRecording,
+    duration: recordingDuration,
+    audioBlob,
+    error: recordingError,
+    permissionDenied,
+    startRecording,
+    stopRecording,
+    cancelRecording,
+    isValidDuration,
+    formatDuration,
+  } = useAudioRecorder();
+
+  const [voiceUploading, setVoiceUploading] = useState(false);
+
+  // 处理录音错误提示
   useEffect(() => {
-    if (activeNav === 'conversations') {
-      loadConversations();
-    } else if (activeNav === 'friends') {
-      loadFriends();
+    if (recordingError) {
+      message.error(recordingError);
     }
-  }, [activeNav]);
+  }, [recordingError]);
+
+  // 处理录音完成后自动发送
+  useEffect(() => {
+    if (audioBlob && !isRecording && isValidDuration()) {
+      handleVoiceSend(audioBlob, recordingDuration);
+    }
+  }, [audioBlob, isRecording]);
+
+  // 语音发送处理
+  const handleVoiceSend = async (blob, duration) => {
+    if (!selectedItem || !wsClient) {
+      message.error('请先选择会话');
+      return;
+    }
+
+    setVoiceUploading(true);
+    try {
+      // 上传语音到服务器
+      const response = await userAPI.uploadVoice(blob, duration);
+      const voiceUrl = response.data.voice_url;
+      const serverDuration = response.data.duration || duration;
+
+      // 使用 url|duration 格式存储，便于前端解析
+      const content = `${voiceUrl}|${serverDuration.toFixed(1)}`;
+
+      // 通过 WebSocket 发送语音消息
+      const msgId = wsClient.sendChatMessage(selectedItem.target_id, content, 3, selectedItem.type);
+
+      if (msgId) {
+        // 更新会话列表并置顶
+        const now = new Date().toISOString();
+        const updateAndMoveToTop = (prev) => {
+          const updatedList = prev.map(conv =>
+            conv.id === selectedItem.id
+              ? {
+                  ...conv,
+                  last_msg_content: '[语音]',
+                  last_msg_time: now,
+                  last_msg_type: 3,
+                }
+              : conv
+          );
+          const currentConv = updatedList.find(conv => conv.id === selectedItem.id);
+          const otherConvs = updatedList.filter(conv => conv.id !== selectedItem.id);
+          return currentConv ? [currentConv, ...otherConvs] : updatedList;
+        };
+        setConversations(updateAndMoveToTop);
+        setFilteredConversations(updateAndMoveToTop);
+
+        // 通过 ref 触发 ChatInterface 更新
+        if (chatInterfaceRef.current?.handleSendMessage) {
+          chatInterfaceRef.current.handleSendMessage(content, 3);
+        }
+      }
+    } catch (error) {
+      console.error('语音上传失败:', error);
+      message.error(error.response?.data?.message || '语音发送失败');
+    } finally {
+      setVoiceUploading(false);
+    }
+  };
+
+  // 消息发送后更新会话列表（稳定引用）- 同时置顶会话
+  const handleMessageSent = useCallback((content, msgType = 1) => {
+    if (!selectedItem) return;
+
+    const displayContent = msgType === 2 ? '[图片]' : (msgType === 3 ? '[语音]' : content);
+    const now = new Date().toISOString();
+
+    // 更新并置顶会话
+    const updateAndMoveToTop = (prev) => {
+      const updatedList = prev.map(conv =>
+        conv.id === selectedItem.id
+          ? {
+              ...conv,
+              last_msg_content: displayContent,
+              last_msg_time: now,
+              last_msg_type: msgType,
+            }
+          : conv
+      );
+      // 找到当前会话并移到最前面
+      const currentConv = updatedList.find(conv => conv.id === selectedItem.id);
+      const otherConvs = updatedList.filter(conv => conv.id !== selectedItem.id);
+      return currentConv ? [currentConv, ...otherConvs] : updatedList;
+    };
+
+    setConversations(updateAndMoveToTop);
+    setFilteredConversations(updateAndMoveToTop);
+  }, [selectedItem]);
+
+  // 处理录音按钮点击
+  const handleVoiceButtonClick = () => {
+    if (isRecording) {
+      // 正在录音，停止录音
+      stopRecording();
+    } else {
+      // 开始录音
+      startRecording();
+    }
+  };
 
   // 注册WebSocket消息处理器，用于实时更新会话列表
   useEffect(() => {
@@ -211,84 +340,38 @@ const MainPage = () => {
 
     const handleGlobalMessage = (type, data) => {
       if (type === 'message') {
-        // 收到新消息时更新会话列表
-        setConversations(prev => {
+        // 判断消息匹配的会话
+        const isMatchingConv = (conv) => {
+          if (data.group_id === undefined && conv.target_id === data.from_user_id && conv.type === 1) {
+            return true; // 单聊消息
+          }
+          if (data.group_id !== undefined && conv.target_id === data.group_id && conv.type === 2) {
+            return true; // 群聊消息
+          }
+          return false;
+        };
+
+        // 更新会话列表并置顶
+        const updateConversationList = (prev) => {
+          let targetConv = null;
+
+          // 更新匹配的会话
           const updatedConversations = prev.map(conv => {
-            // 单聊消息
-            if (data.group_id === undefined && conv.target_id === data.from_user_id && conv.type === 1) {
-              return {
+            if (isMatchingConv(conv)) {
+              targetConv = {
                 ...conv,
                 last_msg_content: data.content,
                 last_msg_time: data.created_at,
+                last_msg_type: data.msg_type,
                 unread_count: conv.unread_count + 1,
               };
-            }
-            // 群聊消息
-            if (data.group_id !== undefined && conv.target_id === data.group_id && conv.type === 2) {
-              return {
-                ...conv,
-                last_msg_content: data.content,
-                last_msg_time: data.created_at,
-                unread_count: conv.unread_count + 1,
-              };
+              return targetConv;
             }
             return conv;
           });
 
           // 如果没有找到对应会话，创建新会话（仅单聊）
-          const existingConv = prev.find(conv =>
-            (data.group_id === undefined && conv.target_id === data.from_user_id && conv.type === 1) ||
-            (data.group_id !== undefined && conv.target_id === data.group_id && conv.type === 2)
-          );
-
-          if (!existingConv && data.from_user && data.group_id === undefined) {
-            // 创建新单聊会话
-            const newConversation = {
-              id: Date.now(), // 临时ID
-              type: 1, // 单聊
-              target_id: data.from_user_id,
-              target_name: data.from_user.nickname,
-              target_avatar: data.from_user.avatar,
-              last_msg_content: data.content,
-              last_msg_time: data.created_at,
-              unread_count: 1,
-            };
-            return [newConversation, ...updatedConversations];
-          }
-
-          return updatedConversations;
-        });
-
-        // 同时更新过滤后的会话列表
-        setFilteredConversations(prev => {
-          const updatedConversations = prev.map(conv => {
-            // 单聊消息
-            if (data.group_id === undefined && conv.target_id === data.from_user_id && conv.type === 1) {
-              return {
-                ...conv,
-                last_msg_content: data.content,
-                last_msg_time: data.created_at,
-                unread_count: conv.unread_count + 1,
-              };
-            }
-            // 群聊消息
-            if (data.group_id !== undefined && conv.target_id === data.group_id && conv.type === 2) {
-              return {
-                ...conv,
-                last_msg_content: data.content,
-                last_msg_time: data.created_at,
-                unread_count: conv.unread_count + 1,
-              };
-            }
-            return conv;
-          });
-
-          const existingConv = prev.find(conv =>
-            (data.group_id === undefined && conv.target_id === data.from_user_id && conv.type === 1) ||
-            (data.group_id !== undefined && conv.target_id === data.group_id && conv.type === 2)
-          );
-
-          if (!existingConv && data.from_user && data.group_id === undefined) {
+          if (!targetConv && data.from_user && data.group_id === undefined) {
             const newConversation = {
               id: Date.now(),
               type: 1,
@@ -297,13 +380,24 @@ const MainPage = () => {
               target_avatar: data.from_user.avatar,
               last_msg_content: data.content,
               last_msg_time: data.created_at,
+              last_msg_type: data.msg_type,
               unread_count: 1,
             };
             return [newConversation, ...updatedConversations];
           }
 
+          // 将有新消息的会话移到最前面
+          if (targetConv) {
+            const otherConvs = updatedConversations.filter(conv => !isMatchingConv(conv));
+            return [targetConv, ...otherConvs];
+          }
+
           return updatedConversations;
-        });
+        };
+
+        // 收到新消息时更新会话列表
+        setConversations(updateConversationList);
+        setFilteredConversations(updateConversationList);
       }
     };
 
@@ -332,7 +426,7 @@ const MainPage = () => {
   }, [conversations, conversationSearchValue]);
 
   // 加载群成员（用于九宫格头像）
-  const loadGroupMembers = async (groupId) => {
+  const loadGroupMembers = useCallback(async (groupId) => {
     // 如果已缓存，直接返回
     if (groupMembersCache[groupId]) {
       return groupMembersCache[groupId];
@@ -352,9 +446,9 @@ const MainPage = () => {
       console.error('加载群成员失败:', error);
     }
     return [];
-  };
+  }, [groupMembersCache]);
 
-  const loadConversations = async () => {
+  const loadConversations = useCallback(async () => {
     try {
       const response = await conversationAPI.getConversations();
       const data = Array.isArray(response.data) ? response.data : [];
@@ -372,9 +466,9 @@ const MainPage = () => {
       console.error('加载会话失败:', error);
       setConversations([]); // 失败时设置为空数组
     }
-  };
+  }, [loadGroupMembers]); // 添加 loadGroupMembers 到依赖数组
 
-  const loadFriends = async () => {
+  const loadFriends = useCallback(async () => {
     try {
       const response = await friendAPI.getFriends();
       const data = Array.isArray(response.data) ? response.data : [];
@@ -386,7 +480,16 @@ const MainPage = () => {
       setFriends([]); // 失败时设置为空数组
       message.error('加载好友失败');
     }
-  };
+  }, []); // 空依赖数组，因为函数内部没有使用任何props或state
+
+  // 加载数据
+  useEffect(() => {
+    if (activeNav === 'conversations') {
+      loadConversations();
+    } else if (activeNav === 'friends') {
+      loadFriends();
+    }
+  }, [activeNav, loadConversations, loadFriends]);
 
   const handleLogout = async () => {
     await logout();
@@ -452,11 +555,6 @@ const MainPage = () => {
   const handleConversationSelect = async (conversation) => {
     setSelectedItem(conversation);
     setRightPanelVisible(true);
-
-    // 如果选择的是群聊，重新显示群成员侧边栏
-    if (conversation.type === 2) {
-      setGroupMembersSidebarVisible(true);
-    }
 
     // 自动清除未读消息
     if (conversation.unread_count > 0) {
@@ -664,32 +762,25 @@ const MainPage = () => {
       const msgId = wsClient.sendChatMessage(selectedItem.target_id, imageUrl, 2, selectedItem.type); // msg_type=2表示图片，传递会话类型
 
       if (msgId) {
-        // 不显示成功提示，图片发送是静默的
-        // message.success('图片发送成功');
-
-        // 更新会话列表（显示[图片]）
-        setConversations(prev =>
-          prev.map(conv =>
+        // 更新会话列表并置顶
+        const now = new Date().toISOString();
+        const updateAndMoveToTop = (prev) => {
+          const updatedList = prev.map(conv =>
             conv.id === selectedItem.id
               ? {
                   ...conv,
                   last_msg_content: '[图片]',
-                  last_msg_time: new Date().toISOString(),
+                  last_msg_time: now,
+                  last_msg_type: 2,
                 }
               : conv
-          )
-        );
-        setFilteredConversations(prev =>
-          prev.map(conv =>
-            conv.id === selectedItem.id
-              ? {
-                  ...conv,
-                  last_msg_content: '[图片]',
-                  last_msg_time: new Date().toISOString(),
-                }
-              : conv
-          )
-        );
+          );
+          const currentConv = updatedList.find(conv => conv.id === selectedItem.id);
+          const otherConvs = updatedList.filter(conv => conv.id !== selectedItem.id);
+          return currentConv ? [currentConv, ...otherConvs] : updatedList;
+        };
+        setConversations(updateAndMoveToTop);
+        setFilteredConversations(updateAndMoveToTop);
 
         // 通过 ref 触发 ChatInterface 更新
         // 这样图片会立即显示在聊天界面中
@@ -726,7 +817,6 @@ const MainPage = () => {
     };
     setSelectedItem(newConversation);
     setRightPanelVisible(true);
-    setGroupMembersSidebarVisible(true); // 显示群成员侧边栏
   };
 
   const renderMainContent = () => {
@@ -1165,31 +1255,7 @@ const MainPage = () => {
                   currentUser={user}
                   inputValue={getInputValue(selectedItem.id)}
                   setInputValue={(value) => setInputValue(selectedItem.id, value)}
-                  onSendMessage={(content) => {
-                    // 发送消息后更新会话列表
-                    setConversations(prev =>
-                      prev.map(conv =>
-                        conv.id === selectedItem.id
-                          ? {
-                              ...conv,
-                              last_msg_content: content,
-                              last_msg_time: new Date().toISOString(),
-                            }
-                          : conv
-                      )
-                    );
-                    setFilteredConversations(prev =>
-                      prev.map(conv =>
-                        conv.id === selectedItem.id
-                          ? {
-                              ...conv,
-                              last_msg_content: content,
-                              last_msg_time: new Date().toISOString(),
-                            }
-                          : conv
-                      )
-                    );
-                  }}
+                  onSendMessage={handleMessageSent}
                   onClearUnread={() => clearUnreadCount(selectedItem.id)}
                 />
               </div>
@@ -1199,7 +1265,7 @@ const MainPage = () => {
                 background: '#fff',
                 borderTop: '1px solid #e5e7eb',
                 padding: '16px',
-                flexShrink: 0, // 防止被压缩
+                flexShrink: 0,
               }}>
                 {/* 隐藏的图片上传input */}
                 <input
@@ -1210,113 +1276,241 @@ const MainPage = () => {
                   onChange={handleImageSelect}
                 />
 
-                {/* 简化的输入框样式 - 普通文本输入 */}
+                {/* 输入框容器 - 保持固定高度，录音时原地替换内容 */}
                 <div style={{
                   background: '#fff',
                   border: '1px solid #e5e7eb',
                   borderRadius: '20px',
                   padding: '8px 16px',
-                  minHeight: '44px',
+                  minHeight: '120px',
                   position: 'relative',
+                  transition: 'border-color 0.2s',
+                  borderColor: isRecording ? '#ff4d4f' : '#e5e7eb',
                 }}>
-                  {/* 第一行：功能按钮栏 */}
-                  <div style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    marginBottom: '6px',
-                  }}>
+                  {isRecording ? (
+                    /* 录音状态UI - 原地替换 */
                     <div style={{
                       display: 'flex',
-                      gap: '16px',
-                      color: '#666',
-                      fontSize: '16px',
+                      flexDirection: 'column',
+                      height: '100%',
+                      minHeight: '104px',
                     }}>
-                      <EmojiPicker
-                        onSelect={(emoji) => {
-                          // 在光标位置插入表情
-                          const currentValue = getInputValue(selectedItem.id);
-                          setInputValue(selectedItem.id, currentValue + emoji);
-                        }}
-                      >
-                        <SmileOutlined
-                          title="表情"
+                      {/* 顶部工具栏 */}
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'space-between',
+                        marginBottom: '12px',
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: '8px',
+                        }}>
+                          <div style={{
+                            width: '8px',
+                            height: '8px',
+                            backgroundColor: '#ff4d4f',
+                            borderRadius: '50%',
+                            animation: 'blink 1s ease-in-out infinite',
+                          }} />
+                          <span style={{
+                            fontSize: '14px',
+                            fontWeight: '500',
+                            color: '#ff4d4f',
+                            fontVariantNumeric: 'tabular-nums',
+                          }}>
+                            {formatDuration(recordingDuration)}
+                          </span>
+                          <span style={{ fontSize: '12px', color: '#999', marginLeft: '8px' }}>
+                            录音中...
+                          </span>
+                        </div>
+                        <CloseOutlined
                           style={{
+                            fontSize: '14px',
+                            color: '#999',
                             cursor: 'pointer',
-                            fontSize: '18px',
+                            padding: '4px',
+                          }}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            cancelRecording();
+                          }}
+                          title="取消录音"
+                        />
+                      </div>
+
+                      {/* 中间波形动画区域 */}
+                      <div style={{
+                        flex: 1,
+                        display: 'flex',
+                        alignItems: 'center',
+                        justifyContent: 'center',
+                        gap: '3px',
+                        minHeight: '40px',
+                      }}>
+                        {[...Array(20)].map((_, i) => (
+                          <div
+                            key={i}
+                            style={{
+                              width: '3px',
+                              backgroundColor: '#ff4d4f',
+                              borderRadius: '2px',
+                              animation: `voiceWave 0.5s ease-in-out infinite`,
+                              animationDelay: `${i * 0.05}s`,
+                              height: '8px',
+                            }}
+                          />
+                        ))}
+                      </div>
+
+                      {/* 底部发送按钮 */}
+                      <div style={{
+                        display: 'flex',
+                        justifyContent: 'flex-end',
+                        marginTop: '12px',
+                      }}>
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: '6px',
+                            padding: '6px 16px',
+                            backgroundColor: isValidDuration() ? '#1890ff' : '#d9d9d9',
+                            color: '#fff',
+                            borderRadius: '16px',
+                            cursor: isValidDuration() ? 'pointer' : 'not-allowed',
+                            fontSize: '14px',
+                            fontWeight: '500',
                             transition: 'all 0.2s',
                           }}
-                          onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
-                          onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
-                        />
-                      </EmojiPicker>
-                      {uploading ? (
-                        <LoadingOutlined title="上传中..." style={{ cursor: 'not-allowed', fontSize: '18px', color: '#999' }} />
-                      ) : (
-                        <PictureOutlined
-                          title="图片"
-                          style={{ cursor: 'pointer', fontSize: '18px', transition: 'all 0.2s' }}
-                          onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
-                          onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
-                          onClick={() => imageInputRef.current?.click()}
-                        />
-                      )}
-                      <AudioOutlined title="语音" style={{ cursor: 'pointer', opacity: 0.6 }} />
+                          onClick={(e) => {
+                            e.preventDefault();
+                            if (isValidDuration()) {
+                              stopRecording();
+                            }
+                          }}
+                        >
+                          <AudioOutlined style={{ fontSize: '14px' }} />
+                          发送语音
+                        </div>
+                      </div>
                     </div>
+                  ) : (
+                    /* 普通输入状态 */
+                    <>
+                      {/* 第一行：功能按钮栏 */}
+                      <div style={{
+                        display: 'flex',
+                        alignItems: 'center',
+                        marginBottom: '6px',
+                      }}>
+                        <div style={{
+                          display: 'flex',
+                          gap: '16px',
+                          color: '#666',
+                          fontSize: '16px',
+                        }}>
+                          <EmojiPicker
+                            onSelect={(emoji) => {
+                              const currentValue = getInputValue(selectedItem.id);
+                              setInputValue(selectedItem.id, currentValue + emoji);
+                            }}
+                          >
+                            <SmileOutlined
+                              title="表情"
+                              style={{
+                                cursor: 'pointer',
+                                fontSize: '18px',
+                                transition: 'all 0.2s',
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
+                              onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
+                            />
+                          </EmojiPicker>
+                          {uploading ? (
+                            <LoadingOutlined title="上传中..." style={{ cursor: 'not-allowed', fontSize: '18px', color: '#999' }} />
+                          ) : (
+                            <PictureOutlined
+                              title="图片"
+                              style={{ cursor: 'pointer', fontSize: '18px', transition: 'all 0.2s' }}
+                              onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
+                              onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
+                              onClick={() => imageInputRef.current?.click()}
+                            />
+                          )}
+                          {voiceUploading ? (
+                            <LoadingOutlined title="发送中..." style={{ cursor: 'not-allowed', fontSize: '18px', color: '#999' }} />
+                          ) : (
+                            <AudioOutlined
+                              title="语音"
+                              style={{
+                                cursor: 'pointer',
+                                fontSize: '18px',
+                                transition: 'all 0.2s',
+                              }}
+                              onMouseEnter={(e) => e.currentTarget.style.color = '#1890ff'}
+                              onMouseLeave={(e) => e.currentTarget.style.color = '#666'}
+                              onClick={handleVoiceButtonClick}
+                            />
+                          )}
+                        </div>
 
-                    {/* 右下角发送文字 - 根据输入状态改变颜色，修复点击问题 */}
-                    <div
-                      style={{
-                        position: 'absolute',
-                        bottom: '8px',
-                        right: '16px',
-                        color: getInputValue(selectedItem.id).trim() ? '#1890ff' : '#ccc', // 有内容时蓝色，无内容时灰色
-                        fontSize: '14px',
-                        fontWeight: '500',
-                        cursor: getInputValue(selectedItem.id).trim() ? 'pointer' : 'not-allowed', // 有内容时可点击
-                        userSelect: 'none',
-                        zIndex: 10, // 确保在最上层
-                        pointerEvents: getInputValue(selectedItem.id).trim() ? 'auto' : 'none', // 有内容时可点击，无内容时不可点击
-                      }}
-                      onClick={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                        if (getInputValue(selectedItem.id).trim() && chatInterfaceRef.current?.handleSendMessage) {
-                          // 直接调用ChatInterface暴露的发送消息方法
-                          chatInterfaceRef.current.handleSendMessage();
-                        }
-                      }}
-                      onMouseDown={(e) => {
-                        e.preventDefault();
-                        e.stopPropagation();
-                      }}
-                    >
-                      发送(S)
-                    </div>
-                  </div>
+                        {/* 右下角发送文字 */}
+                        <div
+                          style={{
+                            position: 'absolute',
+                            bottom: '8px',
+                            right: '16px',
+                            color: getInputValue(selectedItem.id).trim() ? '#1890ff' : '#ccc',
+                            fontSize: '14px',
+                            fontWeight: '500',
+                            cursor: getInputValue(selectedItem.id).trim() ? 'pointer' : 'not-allowed',
+                            userSelect: 'none',
+                            zIndex: 10,
+                            pointerEvents: getInputValue(selectedItem.id).trim() ? 'auto' : 'none',
+                          }}
+                          onClick={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                            if (getInputValue(selectedItem.id).trim() && chatInterfaceRef.current?.handleSendMessage) {
+                              chatInterfaceRef.current.handleSendMessage();
+                            }
+                          }}
+                          onMouseDown={(e) => {
+                            e.preventDefault();
+                            e.stopPropagation();
+                          }}
+                        >
+                          发送(S)
+                        </div>
+                      </div>
 
-                  {/* 第二行：输入区域 - 扩展到三行空白 */}
-                  <TextArea
-                    value={getInputValue(selectedItem.id)}
-                    onChange={(e) => setInputValue(selectedItem.id, e.target.value)}
-                    placeholder="输入消息..."
-                    autoSize={{ minRows: 3, maxRows: 6 }} // 减少到3行空白，支持最多6行
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter' && !e.shiftKey) {
-                        e.preventDefault();
-                        // 这个逻辑会在ChatInterface中处理
-                      }
-                    }}
-                    style={{
-                      resize: 'none',
-                      border: 'none',
-                      padding: '0',
-                      lineHeight: '1.6', // 稍微增加行高，填充视觉空白
-                      fontSize: '15px',
-                      background: 'transparent',
-                      outline: 'none',
-                      boxShadow: 'none',
-                    }}
-                  />
+                      {/* 第二行：输入区域 */}
+                      <TextArea
+                        value={getInputValue(selectedItem.id)}
+                        onChange={(e) => setInputValue(selectedItem.id, e.target.value)}
+                        placeholder="输入消息..."
+                        autoSize={{ minRows: 3, maxRows: 6 }}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter' && !e.shiftKey) {
+                            e.preventDefault();
+                          }
+                        }}
+                        style={{
+                          resize: 'none',
+                          border: 'none',
+                          padding: '0',
+                          lineHeight: '1.6',
+                          fontSize: '15px',
+                          background: 'transparent',
+                          outline: 'none',
+                          boxShadow: 'none',
+                        }}
+                      />
+                    </>
+                  )}
                 </div>
               </div>
             </>

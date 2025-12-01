@@ -2,6 +2,7 @@ import React, { createContext, useContext, useEffect, useState, useRef } from 'r
 import { App } from 'antd';
 import WebSocketClient from '../services/websocket';
 import { useAuth } from './AuthContext';
+import { getWsUrl } from '../config';
 
 const WebSocketContext = createContext(null);
 
@@ -32,7 +33,7 @@ export const WebSocketProvider = ({ children }) => {
         return;
       }
 
-      const client = new WebSocketClient('ws://localhost:8080/ws', token);
+      const client = new WebSocketClient(getWsUrl(), token);
 
       // 连接成功事件
       client.on('connected', () => {

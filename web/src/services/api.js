@@ -1,17 +1,26 @@
 import axios from 'axios';
+import { getApiBaseUrl } from '../config';
 
-// 创建axios实例
+// 创建axios实例 - 不设置固定 baseURL，在拦截器中动态设置
 const api = axios.create({
-  baseURL: process.env.REACT_APP_API_BASE_URL || '/api/v1',
   timeout: 10000,
   headers: {
     'Content-Type': 'application/json',
   },
 });
 
-// 请求拦截器 - 添加认证token
+// 请求拦截器 - 动态设置 baseURL 和添加认证 token
 api.interceptors.request.use(
   (config) => {
+    // 动态获取 baseURL（支持跨机器访问）
+    const baseURL = getApiBaseUrl();
+    config.baseURL = baseURL;
+
+    // 开发环境下输出调试信息
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[API] Request:', config.method?.toUpperCase(), baseURL + config.url);
+    }
+
     const token = localStorage.getItem('token');
     if (token) {
       config.headers.Authorization = `Bearer ${token}`;
@@ -79,6 +88,21 @@ export const userAPI = {
     const formData = new FormData();
     formData.append('image', file);
     return api.post('/upload/image', formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+  },
+
+  // 上传语音文件
+  uploadVoice: (file, duration) => {
+    const formData = new FormData();
+    // 为文件添加正确的文件名和扩展名
+    const extension = file.extension || '.webm';
+    const fileName = `voice_${Date.now()}${extension}`;
+    formData.append('voice', file, fileName);
+    formData.append('duration', duration.toString());
+    return api.post('/upload/voice', formData, {
       headers: {
         'Content-Type': 'multipart/form-data',
       },

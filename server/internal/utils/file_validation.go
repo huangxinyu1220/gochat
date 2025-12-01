@@ -81,3 +81,68 @@ func ValidateImageFile(file io.ReadSeeker, filename string, ext string) error {
 
 	return nil
 }
+
+// ValidateAudioMimeType 验证是否为允许的音频MIME类型
+func ValidateAudioMimeType(mimeType string) bool {
+	allowedMimeTypes := map[string]bool{
+		"audio/webm":         true,
+		"audio/mp4":          true,
+		"audio/mpeg":         true,
+		"audio/ogg":          true,
+		"audio/wav":          true,
+		"audio/x-wav":        true,
+		"audio/m4a":          true,
+		"audio/x-m4a":        true,
+		"audio/aac":          true,
+		"video/webm":         true, // WebM音频有时被检测为video/webm
+		"application/ogg":    true, // Ogg音频有时被检测为application/ogg
+		"application/octet-stream": true, // 某些浏览器可能返回通用类型
+	}
+	return allowedMimeTypes[mimeType]
+}
+
+// ValidateAudioExtensionMimeTypeMatch 验证音频扩展名和MIME类型是否匹配
+func ValidateAudioExtensionMimeTypeMatch(ext, mimeType string) bool {
+	validCombinations := map[string][]string{
+		".webm": {"audio/webm", "video/webm", "application/octet-stream"},
+		".mp4":  {"audio/mp4", "audio/m4a", "audio/x-m4a", "audio/aac", "application/octet-stream"},
+		".m4a":  {"audio/mp4", "audio/m4a", "audio/x-m4a", "audio/aac", "application/octet-stream"},
+		".mp3":  {"audio/mpeg", "application/octet-stream"},
+		".ogg":  {"audio/ogg", "application/ogg", "application/octet-stream"},
+		".wav":  {"audio/wav", "audio/x-wav", "application/octet-stream"},
+		".aac":  {"audio/aac", "audio/mp4", "application/octet-stream"},
+	}
+
+	allowedMimeTypes, exists := validCombinations[ext]
+	if !exists {
+		return false
+	}
+
+	for _, allowedMimeType := range allowedMimeTypes {
+		if allowedMimeType == mimeType {
+			return true
+		}
+	}
+	return false
+}
+
+// ValidateAudioFile 完整的音频文件验证（扩展名+MIME类型）
+func ValidateAudioFile(file io.ReadSeeker, filename string, ext string) error {
+	// 检测文件的真实MIME类型
+	mimeType, err := DetectMimeType(file)
+	if err != nil {
+		return fmt.Errorf("failed to detect file type: %v", err)
+	}
+
+	// 验证MIME类型是否为允许的音频类型
+	if !ValidateAudioMimeType(mimeType) {
+		return fmt.Errorf("invalid file type detected: %s. Only audio files are allowed", mimeType)
+	}
+
+	// 验证文件扩展名和MIME类型是否匹配（防止文件伪装）
+	if !ValidateAudioExtensionMimeTypeMatch(ext, mimeType) {
+		return fmt.Errorf("file extension %s does not match detected file type %s", ext, mimeType)
+	}
+
+	return nil
+}

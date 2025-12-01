@@ -28,8 +28,10 @@ func SetupAPIRoutes(r *gin.Engine, cfg *config.Config) {
 	r.Use(middleware.RequestLogger())          // 日志
 	r.Use(middleware.Recovery())               // 错误恢复
 
-	// 静态文件服务 - 移动到CORS中间件之后
-	r.Static("/uploads", "./uploads")
+	// 静态文件服务 - 确保CORS头正确应用
+	staticGroup := r.Group("/uploads")
+	staticGroup.Use(middleware.CORS(&cfg.CORS)) // 确保静态文件也有CORS头
+	staticGroup.Static("", "./uploads")
 
 	// 配置速率限制
 	rateLimitConfig := &middleware.RateLimitConfig{
@@ -125,6 +127,7 @@ func SetupAPIRoutes(r *gin.Engine, cfg *config.Config) {
 	upload := apiV1.Group("/upload")
 	{
 		upload.POST("/image", uploadHandler.UploadImage)
+		upload.POST("/voice", uploadHandler.UploadVoice)
 	}
 
 	// 群组相关的路由
